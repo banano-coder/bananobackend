@@ -2,6 +2,8 @@ const app = require('./app');
 const env = require('./config/env');
 const { pool } = require('./db/pool');
 
+
+
 const server = app.listen(env.PORT, () => {
   console.log(`🚀 API lista en http://localhost:${env.PORT}`);
 });

@@ -62,7 +62,7 @@ router.put('/products/:id', requireAuth, requireRole('admin','manager'), async (
     const { id } = req.params;
     const { id_categoria, id_marca, nombre, sku_base, descripcion, activo } = req.body || {};
     const { rows } = await pool.query(
-      `UPDATE products
+      `UPDATE producto
        SET id_categoria = COALESCE($2, id_categoria),
        id_marca     = COALESCE($3, id_marca),
        nombre       = COALESCE($4, nombre),
