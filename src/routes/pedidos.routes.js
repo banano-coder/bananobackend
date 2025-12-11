@@ -1,0 +1,390 @@
+// src/routes/pedidos.routes.js
+const { Router } = require('express');
+const { pool } = require('../db/pool');
+const { requireAuth, requireRole } = require('../middlewares/requireAuth');
+
+const router = Router();
+
+// Número de WhatsApp de Banano (env o fallback)
+const BANANO_WA = process.env.BANANO_WA || '584129326373';
+
+// Helpers
+function toInt(v, def) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : def; }
+function toFloat(v, def) { const n = parseFloat(v); return Number.isFinite(n) ? n : def; }
+
+// Arma texto de WhatsApp (sin teléfono del cliente)
+function buildWaText({ id_pedido, cliente_nombre, items, total, nota }) {
+  const header = `Consulta de pedido #${id_pedido}`;
+  const cliente = cliente_nombre ? `Nombre: ${cliente_nombre}` : '';
+
+  const lineas = items.map(it => {
+    const sku = it.sku ? ` (${it.sku})` : '';
+    const subtotal = Number(it.subtotal || (it.precio_unitario * it.cantidad) || 0);
+    return `• ${it.nombre_producto}${sku} x${it.cantidad} = $${subtotal.toFixed(2)}`;
+  }).join('\n');
+
+  const totalTxt = `Total estimado: $${Number(total || 0).toFixed(2)}`;
+  const notaTxt = nota ? `\nNota: ${nota}` : '';
+
+  return [header, cliente, lineas, totalTxt]
+    .filter(Boolean)
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .join('\n\n') + notaTxt;
+}
+
+// Devuelve link wa.me con ?text=
+function buildWaLink(phone, text) {
+  const enc = encodeURIComponent(text);
+  return `https://wa.me/${phone}?text=${enc}`;
+}
+
+/**
+ * 1) Checkout invitado (sin login)
+ * POST /api/guest/checkout
+ * Body:
+ * {
+ *   "items": [ { "id_variante": 123, "cantidad": 2 }, ... ],
+ *   "cliente_nombre": "Isa",
+ *   "nota": "entrega hoy",
+ *   "cart_token": "uuid-optional"
+ * }
+ * Calcula precios desde variante_producto.precio_lista,
+ * guarda pedido + items (snapshot). No toca inventario.
+ * Auditoría: PEDIDO_CREAR (actor_id = NULL porque es invitado).
+ */
+router.post('/guest/checkout', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { items, cliente_nombre, nota } = req.body || {};
+
+    // Validaciones básicas
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ status: 'error', message: 'items es requerido y no puede estar vacío' });
+    }
+    if (!cliente_nombre) {
+      return res.status(400).json({ status: 'error', message: 'cliente_nombre es requerido' });
+    }
+
+    // Normalizar items (admite id_variante_producto | id_variante | id)
+    const normItems = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      const rawId = it.id_variante_producto ?? it.id_variante ?? it.id;
+      const idVar = Number.parseInt(rawId, 10);
+      const qty   = Number.parseInt(it.cantidad, 10);
+      if (!Number.isInteger(idVar) || idVar <= 0) {
+        return res.status(400).json({ status: 'error', message: `Cada item debe tener id_variante válido (ítem ${i+1})` });
+      }
+      if (!Number.isInteger(qty) || qty <= 0) {
+        return res.status(400).json({ status: 'error', message: `Cantidad inválida para el ítem ${i+1}` });
+      }
+      normItems.push({ id_variante_producto: idVar, cantidad: qty });
+    }
+    const ids = normItems.map(x => x.id_variante_producto);
+
+    // Traer variantes + producto + inventario
+    const { rows: variantes } = await pool.query(
+      `
+      SELECT
+        vp.id_variante_producto,
+        vp.sku,
+        vp.precio_lista::numeric AS precio_lista,
+        COALESCE(inv.stock, 0)::int AS stock,
+        vp.activo,
+        p.nombre AS nombre_producto
+      FROM public.variante_producto vp
+      JOIN public.producto p
+        ON p.id_producto = vp.id_producto
+      LEFT JOIN public.inventario inv
+        ON inv.id_variante_producto = vp.id_variante_producto
+      WHERE vp.id_variante_producto = ANY($1::int[])
+      `,
+      [ids]
+    );
+    const mapVar = new Map(variantes.map(v => [Number(v.id_variante_producto), v]));
+
+    // Validaciones de negocio
+    for (const it of normItems) {
+      const v = mapVar.get(Number(it.id_variante_producto));
+      if (!v) return res.status(400).json({ status: 'error', message: `Variante ${it.id_variante_producto} no existe` });
+      if (v.activo === false) return res.status(400).json({ status: 'error', message: `Variante ${it.id_variante_producto} inactiva` });
+      if (v.stock < it.cantidad) return res.status(400).json({ status: 'error', message: `Stock insuficiente en variante ${it.id_variante_producto} (disp: ${v.stock})` });
+      if (v.precio_lista == null) return res.status(500).json({ status: 'error', message: `Variante ${it.id_variante_producto} no tiene precio_lista` });
+    }
+
+    await client.query('BEGIN');
+
+    // Crear pedido (sin teléfono)
+    const { rows: ped } = await client.query(
+      `INSERT INTO public.pedido (cliente_nombre, observacion, estado)
+       VALUES ($1, $2, 'nuevo') RETURNING id_pedido`,
+      [cliente_nombre, nota || null]
+    );
+    const id_pedido = ped[0].id_pedido;
+
+    // Insertar items y calcular total
+    let total = 0;
+    const snapshotItems = [];
+    for (const it of normItems) {
+      const v = mapVar.get(Number(it.id_variante_producto));
+      const unit = Number(v.precio_lista);
+      const sub  = +(unit * it.cantidad).toFixed(2);
+
+      await client.query(
+        `INSERT INTO public.pedido_item (id_pedido, id_variante_producto, nombre_producto, sku, cantidad, precio_unitario, subtotal)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [id_pedido, v.id_variante_producto, v.nombre_producto, v.sku, it.cantidad, unit, sub]
+      );
+      total += sub;
+
+      snapshotItems.push({
+        id_variante: v.id_variante_producto,
+        nombre_producto: v.nombre_producto,
+        sku: v.sku,
+        precio_unitario: unit,
+        cantidad: it.cantidad,
+        subtotal: sub
+      });
+    }
+
+    // Auditoría (actor_id NULL por invitado)
+    await client.query(
+      `INSERT INTO public.auditoria (actor_id, target_pedido_id, target_tipo, action, payload, created_at)
+       VALUES ($1, $2, 'pedido', 'PEDIDO_CREAR', $3::jsonb, NOW())`,
+      [null, id_pedido, JSON.stringify({ cliente_nombre, total, items: normItems })]
+    );
+
+    // Generar mensaje y link WA (siempre a Banano)
+    const texto = buildWaText({
+      id_pedido,
+      cliente_nombre,
+      items: snapshotItems,
+      total,
+      nota
+    });
+    const waUrl = buildWaLink(BANANO_WA, texto);
+
+    // (Opcional) guardar snapshot WA
+    await client.query(
+      `UPDATE public.pedido
+         SET whatsapp_text = $2, whatsapp_link = $3, updated_at = NOW()
+       WHERE id_pedido = $1`,
+      [id_pedido, texto, waUrl]
+    );
+
+    await client.query('COMMIT');
+    return res.status(201).json({ id_pedido, waUrl });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch {}
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * 2) Listado (admin/manager)
+ * GET /api/pedidos?estado=&from=&to=&search=&page=1&limit=20
+ * (search solo por nombre ahora)
+ */
+router.get('/pedidos', requireAuth, requireRole('admin','manager'), async (req, res, next) => {
+  try {
+    const estado = (req.query.estado || '').trim();
+    const from = (req.query.from || '').trim();
+    const to = (req.query.to || '').trim();
+    const search = (req.query.search || '').trim();
+    const page = Math.max(1, toInt(req.query.page, 1));
+    const limit = Math.min(100, Math.max(1, toInt(req.query.limit, 20)));
+    const offset = (page - 1) * limit;
+
+    const conds = [];
+    const params = [];
+    let i = 1;
+
+    if (estado) { conds.push(`p.estado = $${i++}`); params.push(estado); }
+    if (from)   { conds.push(`p.created_at >= $${i++}::timestamptz`); params.push(from); }
+    if (to)     { conds.push(`p.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+    if (search) {
+      conds.push(`(p.cliente_nombre ILIKE $${i})`);
+      params.push(`%${search}%`); i++;
+    }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+    const allowedSort = new Set(['created_at','estado','total']);
+    const sort = allowedSort.has((req.query.sort||'').toLowerCase()) ? req.query.sort.toLowerCase() : 'created_at';
+    const dir  = (req.query.dir||'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+    const sortCol = sort === 'total' ? 'p.total_estimado' : sort === 'estado' ? 'p.estado' : 'p.created_at';
+
+
+    const { rows: t } = await pool.query(`SELECT COUNT(*)::int AS total FROM public.pedido p ${where}`, params);
+    const total = t[0].total;
+
+    const { rows: data } = await pool.query(
+      `
+      SELECT p.id_pedido, p.origen, p.cliente_nombre,
+             p.total_estimado::float AS total_estimado, p.estado, p.created_at, p.updated_at
+      FROM public.pedido p
+      ${where}
+      ORDER BY ${sortCol} ${dir}
+      LIMIT ${limit} OFFSET ${offset}
+      `,
+      params
+    );
+
+    res.json({ data, page, limit, total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * 5) Exportar pedidos a CSV (admin/manager)
+ * GET /api/pedidos/export?estado=&from=&to=&search=&sort=&dir=
+ * - sort: created_at | estado | total
+ * - dir: asc | desc
+ */
+router.get('/pedidos/export', requireAuth, requireRole('admin','manager'), async (req, res, next) => {
+  try {
+    const allowedSort = new Set(['created_at','estado','total']);
+    const sort = allowedSort.has((req.query.sort||'').toLowerCase())
+      ? req.query.sort.toLowerCase()
+      : 'created_at';
+    const dir  = (req.query.dir||'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+    const sortCol =
+      sort === 'total' ? 'p.total_estimado'
+      : sort === 'estado' ? 'p.estado'
+      : 'p.created_at';
+
+    // Traemos datos útiles y el whatsapp_text (legible)
+    const { rows } = await pool.query(`
+      SELECT
+        p.id_pedido,
+        p.created_at,
+        p.cliente_nombre,
+        p.estado,
+        COALESCE(p.total_estimado,0)::float AS total_estimado,
+        p.empleado_asignado AS empleado_id,
+        u.nombre AS empleado_nombre,
+        p.whatsapp_text,         -- texto legible
+        p.whatsapp_link          -- link (url-encodeado)
+      FROM public.pedido p
+      LEFT JOIN public.usuario u ON u.id_usuario = p.empleado_asignado
+      ORDER BY ${sortCol} ${dir}
+    `);
+
+    // Utilidad para escapar CSV (doble comillas y CRLF)
+    const esc = (v) => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      // Si contiene comillas, coma, salto de línea o punto y coma, lo citamos
+      if (/[",\n;\r]/.test(s)) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+
+    // Cabeceras (elige ; si quieres separador “latam” para Excel)
+    const SEP = ','; // cambia a ';' si prefieres punto y coma
+    const header = [
+      'id_pedido','fecha','cliente_nombre','estado','total_estimado',
+      'empleado_id','empleado_nombre','whatsapp_text','whatsapp_link'
+    ].join(SEP);
+
+    // Filas
+    const lines = rows.map(r => [
+      esc(r.id_pedido),
+      esc(r.created_at.toISOString()),
+      esc(r.cliente_nombre),
+      esc(r.estado),
+      esc(r.total_estimado),
+      esc(r.empleado_id),
+      esc(r.empleado_nombre),
+      esc(r.whatsapp_text || ''),  // texto legible
+      esc(r.whatsapp_link || '')   // link para clickear
+    ].join(SEP));
+
+    const csv = [header, ...lines].join('\r\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="pedidos.csv"');
+    res.status(200).send(csv);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** 3) Detalle (admin/manager) */
+router.get('/pedidos/:id', requireAuth, requireRole('admin','manager'), async (req, res, next) => {
+  try {
+    const id = toInt(req.params.id, 0);
+    if (!id) return res.status(400).json({ message: 'id inválido' });
+
+    const { rows: head } = await pool.query(
+      `
+      SELECT id_pedido, origen, cliente_nombre,
+             total_estimado::float AS total_estimado, estado, whatsapp_text, whatsapp_link,
+             observacion, empleado_asignado, created_at, updated_at
+      FROM public.pedido WHERE id_pedido = $1
+      `,
+      [id]
+    );
+    if (!head.length) return res.status(404).json({ message: 'Pedido no encontrado' });
+
+    const { rows: items } = await pool.query(
+      `
+      SELECT id_pedido_item, id_variante_producto, nombre_producto, sku,
+             precio_unitario::float AS precio_unitario, cantidad, subtotal::float AS subtotal
+      FROM public.pedido_item WHERE id_pedido = $1 ORDER BY id_pedido_item
+      `,
+      [id]
+    );
+
+    res.json({ ...head[0], items });
+  } catch (err) { next(err); }
+});
+
+/**
+ * 4) Cambiar estado (admin/manager o vendedor)
+ * PATCH /api/pedidos/:id/estado
+ * Body: { "estado": "contactado|concretado|cancelado" }
+ * Auditoría: PEDIDO_CAMBIAR_ESTADO
+ */
+router.patch('/pedidos/:id/estado', requireAuth, requireRole('admin','manager','vendedor'), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const id = toInt(req.params.id, 0);
+    const estado = String(req.body?.estado || '').trim();
+    const valid = new Set(['nuevo','contactado','concretado','cancelado']);
+    if (!id) return res.status(400).json({ message: 'id inválido' });
+    if (!valid.has(estado)) return res.status(400).json({ message: 'estado inválido' });
+
+    await client.query('BEGIN');
+
+    const { rowCount } = await client.query(
+      `UPDATE public.pedido SET estado = $2, updated_at = NOW() WHERE id_pedido = $1`,
+      [id, estado]
+    );
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Pedido no encontrado' });
+    }
+
+    await client.query(
+      `INSERT INTO public.auditoria (actor_id, target_pedido_id, target_tipo, action, payload, created_at)
+       VALUES ($1, $2, 'pedido', 'PEDIDO_CAMBIAR_ESTADO', $3::jsonb, NOW())`,
+      [req.user.id || req.user.sub, id, JSON.stringify({ estado })]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Estado actualizado', estado });
+  } catch (err) {
+    await pool.query('ROLLBACK').catch(()=>{});
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+
+module.exports = router;
