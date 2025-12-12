@@ -37,6 +37,20 @@ router.post('/products', requireAuth, requireRole('admin','manager'), async (req
   }
     next(err);
   }
+
+  // Auditoría: creación de producto (sin target_producto_id)
+await client.query(
+  `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
+   VALUES ($1, 'producto', 'PRODUCT_CREATE', $2::jsonb, NOW())`,
+  [
+    req.user.id || req.user.sub,
+    JSON.stringify({
+      id_producto: producto.id_producto,
+      data: req.body || {}
+    })
+  ]
+);
+
 });
 
 // OBTENER POR ID
@@ -81,6 +95,19 @@ router.put('/products/:id', requireAuth, requireRole('admin','manager'), async (
     }
     next(err);
   }
+  // Auditoría: actualización de producto (sin target_producto_id)
+await client.query(
+  `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
+   VALUES ($1, 'producto', 'PRODUCT_UPDATE', $2::jsonb, NOW())`,
+  [
+    req.user.id || req.user.sub,
+    JSON.stringify({
+      id_producto: actualizado.id_producto,
+      changes: req.body || {}
+    })
+  ]
+);
+
 });
 
 // ELIMINAR
@@ -98,7 +125,18 @@ router.delete('/products/:id', requireAuth, requireRole('admin','manager'), asyn
     res.status(204).send();
   } catch (err) {
     next(err);
+  
   }
+  // Auditoría: desactivación de producto (sin target_producto_id)
+await client.query(
+  `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
+   VALUES ($1, 'producto', 'PRODUCT_DISABLE', $2::jsonb, NOW())`,
+  [
+    req.user.id || req.user.sub,
+    JSON.stringify({ id_producto: rows[0].id_producto })
+  ]
+);
+
 });
 
 module.exports = router;
