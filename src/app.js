@@ -17,6 +17,7 @@ const imagesRoutes = require('./routes/images.routes');
 const variantsRoutes = require('./routes/variants.routes');
 const categoriesRoutes = require('./routes/categories.routes');
 const brandsRoutes = require('./routes/brands.routes');
+const reportsRoutes = require('./routes/reports.routes');
 const { notFound, errorHandler } = require('./middlewares/error.middleware');
 
 const app = express();
@@ -42,6 +43,7 @@ app.use('/api', imagesRoutes);
 app.use('/api', variantsRoutes);
 app.use('/api', brandsRoutes);
 app.use('/api', categoriesRoutes);
+app.use('/api/', reportsRoutes);
 
 // 404 & errores
 app.use(notFound);
