@@ -71,12 +71,12 @@ router.post('/signup', async (req, res, next) => {
 
 /** 🔎 AUDITORÍA DEL SIGNUP*/
 await client.query(
-  `INSERT INTO public.auditoria (actor_id, target_id, action, payload)
+  `INSERT INTO public.auditoria (actor_id, action, target_tipo, payload)
    VALUES ($1, $2, $3, $4::jsonb)`,
   [
-    user.id_usuario,                 // actor_id (el propio usuario)
-    user.id_usuario,                 // target_id
-    'CREATE_USER_SIGNUP',            // action
+    user.id_usuario,
+    'CREATE_USER_SIGNUP',
+    'usuario', // o 'auth_user' si tienes varios tipos de entidades
     JSON.stringify({ rol: rolInicial, email: emailNorm })
   ]
 );
