@@ -105,6 +105,8 @@ router.get('/catalog/products', async (req, res, next) => {
         p.sku_base,
         p.descripcion,
         p.fecha_creacion,
+       p.id_categoria,
+       p.id_marca,
         MIN(precio_lista) AS min_price,
         COUNT(precio_lista) FILTER (WHERE vp.activo = true) AS variantes_activas
       FROM public.producto p

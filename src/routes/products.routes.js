@@ -8,7 +8,7 @@ const router = Router();
 router.get('/products', async (_req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id_producto, id_categoria, id_categoria,id_marca, nombre, descripcion, activo, fecha_creacion
+      `SELECT id_producto, id_categoria, id_marca, nombre, descripcion, activo, fecha_creacion
       FROM producto
        ORDER BY fecha_creacion DESC`
     );
