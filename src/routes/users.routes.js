@@ -211,7 +211,7 @@ router.patch('/users/:id/status', requireAuth, requireRole('admin'), async (req,
     }
 
     await client.query(
-      `INSERT INTO public.auditoria (actor_id, target_id, action, payload)
+      `INSERT INTO public.auditoria (actor_id, target_usuario_id, action, payload)
        VALUES ($1, $2, $3, $4::jsonb)`,
       [
         req.user.id || req.user.sub,
@@ -251,7 +251,7 @@ router.patch('/users/:id/password', requireAuth, requireRole('admin'), async (re
     if (!rowCount) return res.status(404).json({ message: 'Usuario no encontrado' });
 
     await pool.query(
-      `INSERT INTO public.auditoria (actor_id, target_id, action, payload)
+      `INSERT INTO public.auditoria (actor_id, target_usuario_id, action, payload)
        VALUES ($1, $2, 'RESET_PASSWORD', $3::jsonb)`,
       [req.user.id || req.user.sub, targetId, JSON.stringify({ by: 'admin' })]
     );
