@@ -165,7 +165,7 @@ router.patch('/users/:id/roles', requireAuth, requireRole('admin'), async (req, 
     await client.query(
       `INSERT INTO public.auditoria (actor_id, target_usuario_id, target_tipo, action, payload)
        VALUES ($1, $2, 'usuario', 'REPLACE_ROLES', $3::jsonb)`,
-      [req.user.id || req.user.sub, id, JSON.stringify({ roles })]
+      [req.user.id || req.user.sub, targetId, JSON.stringify({ roles })]
     );
 
     await client.query('COMMIT');
