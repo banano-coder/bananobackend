@@ -148,7 +148,7 @@ router.delete('/variants/:id', requireAuth, requireRole('admin','manager'), asyn
 
     await client.query('COMMIT');
     res.json({ message:'Variante desactivada' });
-  }catch(err){ try{await pool.query('ROLLROLLBACK')}catch{}; next(err); }
+  }catch(err){ try{await pool.query('ROLLBACK')}catch{}; next(err); }
   finally{ client.release(); }
 });
 

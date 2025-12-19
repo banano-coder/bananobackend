@@ -50,22 +50,28 @@ router.post('/products/:id/images',
       if (!Number.isInteger(idProd) || idProd <= 0) return res.status(400).json({ message: 'id inválido' });
       if (!req.file) return res.status(400).json({ message: 'Archivo "image" requerido' });
 
+      // Support for optional variant association
+      let idVariante = req.body.id_variante_producto ? parseInt(req.body.id_variante_producto, 10) : null;
+      if (idVariante && isNaN(idVariante)) idVariante = null;
+
       const url = publicUrl(req.file.filename);
 
       await client.query('BEGIN');
 
-      // ¿ya hay principal?
+      // ¿ya hay principal? (Global per product OR per variant? Let's keep "principal" per product for now, or complicated)
+      // Implementation: If I upload for a variant, does it become principal of the product? Maybe not automatically.
+      // Logic: LIMIT 1 scope.
       const { rows: rp } = await client.query(
         `SELECT 1 FROM public.imagen_producto WHERE id_producto = $1 AND es_principal = true AND activo = true LIMIT 1`,
         [idProd]
       );
-      const esPrincipal = rp.length === 0; // primera imagen será principal
+      const esPrincipal = rp.length === 0;
 
       const { rows } = await client.query(
-        `INSERT INTO public.imagen_producto (id_producto, url, es_principal, activo)
-         VALUES ($1, $2, $3, true)
-         RETURNING id_imagen_producto, url, es_principal, activo`,
-        [idProd, url, esPrincipal]
+        `INSERT INTO public.imagen_producto (id_producto, id_variante_producto, url, es_principal, activo)
+         VALUES ($1, $2, $3, $4, true)
+         RETURNING id_imagen_producto, id_producto, id_variante_producto, url, es_principal, activo`,
+        [idProd, idVariante, url, esPrincipal]
       );
 
 
@@ -88,11 +94,12 @@ router.get('/products/:id/images',
       const idProd = parseInt(req.params.id, 10);
       if (!Number.isInteger(idProd) || idProd <= 0) return res.status(400).json({ message: 'id inválido' });
 
+      // Return all images for the product, including those assigned to variants
       const { rows } = await pool.query(
-        `SELECT id_imagen_producto, url, es_principal, activo
+        `SELECT id_imagen_producto, id_producto, id_variante_producto, url, es_principal, activo
            FROM public.imagen_producto
-          WHERE id_producto = $1
-          ORDER BY es_principal DESC, id_imagen_producto`,
+          WHERE id_producto = $1 AND activo = true
+          ORDER BY es_principal DESC, id_variante_producto NULLS FIRST, id_imagen_producto`,
         [idProd]
       );
       res.json({ data: rows });
@@ -156,8 +163,7 @@ router.delete('/products/:id/images/:imgId',
       await client.query('BEGIN');
 
       const { rows } = await client.query(
-        `UPDATE public.imagen_producto
-            SET activo=false, es_principal=false
+        `DELETE FROM public.imagen_producto
           WHERE id_imagen_producto=$1 AND id_producto=$2
           RETURNING url`,
         [idImg, idProd]
@@ -167,10 +173,17 @@ router.delete('/products/:id/images/:imgId',
       await client.query('COMMIT');
 
       // (opcional) borrar archivo físico:
-      // const fname = rows[0].url.replace('/uploads/products/', '');
-      // fs.unlink(path.join(UP_BASE, fname), ()=>{});
+      try {
+        const fname = rows[0].url.replace('/uploads/products/', '');
+        const filePath = path.join(UP_BASE, fname);
+        if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+        }
+      } catch (e) {
+        console.error("Error deleting file", e);
+      }
 
-      res.json({ message: 'Imagen desactivada' });
+      res.json({ message: 'Imagen eliminada permanentemente' });
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch {}
       next(err);

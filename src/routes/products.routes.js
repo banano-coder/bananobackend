@@ -18,7 +18,13 @@ router.get('/products', async (_req, res, next) => {
         p.activo, 
         p.fecha_creacion,
         c.nombre as category_name,
-        m.nombre as brand_name
+        m.nombre as brand_name,
+        (
+          SELECT COALESCE(SUM(i.stock), 0)::int
+          FROM variante_producto vp
+          LEFT JOIN inventario i ON vp.id_variante_producto = i.id_variante_producto
+          WHERE vp.id_producto = p.id_producto
+        ) as total_stock
       FROM producto p
       LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
       LEFT JOIN marca m ON p.id_marca = m.id_marca
