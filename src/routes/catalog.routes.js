@@ -181,6 +181,7 @@ router.get('/catalog/products/:id', async (req, res, next) => {
         vp.sku,
         vp.precio_lista::float AS precio_lista,
         COALESCE(inv.stock, 0)::int AS stock,
+        vp.atributos_json,
         vp.activo
       FROM public.variante_producto vp
       LEFT JOIN public.inventario inv
@@ -210,6 +211,7 @@ router.get('/catalog/products/:id/variants', async (req, res, next) => {
         vp.sku,
         vp.precio_lista::float AS precio_lista,
         COALESCE(inv.stock, 0)::int AS stock,
+        vp.atributos_json,
         vp.activo
       FROM public.variante_producto vp
       LEFT JOIN public.inventario inv
