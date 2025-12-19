@@ -233,4 +233,76 @@ router.get('/reports/alertas/stock-bajo',
   }
 );
 
+/**
+ * Auditoría (timeline de eventos)
+ * GET /api/auditoria?target_tipo=&target_pedido_id=&target_usuario_id=&action=&actor_id=&from=&to=&page=&limit=
+ * Roles:
+ *   - admin/manager: ven todo
+ *   - vendedor: solo eventos de pedidos
+ */
+router.get('/auditoria',
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const roles = req.user?.roles || [];
+      const isAdminMgr = roles.some(r => r === 'admin' || r === 'manager');
+      const isVendor = roles.includes('vendedor');
+      if (!isAdminMgr && !isVendor) {
+        return res.status(403).json({ message: 'No autorizado' });
+      }
+
+      const target_tipo = (req.query.target_tipo || '').trim();
+      const target_pedido_id = parseInt(req.query.target_pedido_id || '0', 10);
+      const target_usuario_id = parseInt(req.query.target_usuario_id || '0', 10);
+      const action = (req.query.action || '').trim();
+      const actor_id = parseInt(req.query.actor_id || '0', 10);
+      const from = parseDate(req.query.from);
+      const to = parseDate(req.query.to);
+      const page = Math.max(1, parseInt(req.query.page || '1', 10));
+      const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
+      const offset = (page - 1) * limit;
+
+      const conds = [];
+      const params = [];
+      let i = 1;
+
+      if (target_tipo) { conds.push(`a.target_tipo = $${i++}`); params.push(target_tipo); }
+      if (target_pedido_id) { conds.push(`a.target_pedido_id = $${i++}`); params.push(target_pedido_id); }
+      if (target_usuario_id) { conds.push(`a.target_usuario_id = $${i++}`); params.push(target_usuario_id); }
+      if (action) { conds.push(`a.action = $${i++}`); params.push(action); }
+      if (actor_id) { conds.push(`a.actor_id = $${i++}`); params.push(actor_id); }
+      if (from) { conds.push(`a.created_at >= $${i++}::timestamptz`); params.push(from); }
+      if (to) { conds.push(`a.created_at < ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+
+      // Restricción: vendedores solo ven auditoría de pedidos
+      if (isVendor && !isAdminMgr) {
+        conds.push(`a.target_tipo = 'pedido'`);
+      }
+
+      const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+      const { rows: tot } = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM public.auditoria a ${where}`,
+        params
+      );
+      const total = tot[0]?.total || 0;
+
+      const { rows: data } = await pool.query(
+        `
+        SELECT a.id_auditoria, a.created_at, a.actor_id,
+               a.target_tipo, a.target_pedido_id, a.target_usuario_id,
+               a.action, a.payload
+          FROM public.auditoria a
+          ${where}
+         ORDER BY a.created_at DESC
+         LIMIT ${limit} OFFSET ${offset}
+        `,
+        params
+      );
+
+      res.json({ data, page, limit, total });
+    } catch (err) { next(err); }
+  }
+);
+
 module.exports = router;
