@@ -31,25 +31,28 @@ router.post('/products', requireAuth, requireRole('admin','manager'), async (req
        RETURNING id_producto, id_categoria, id_marca, nombre, sku_base, descripcion, activo, fecha_creacion`,
        [id_categoria, id_marca, nombre, sku_base || null, descripcion || null, activo]
     );
-    res.status(201).json(rows[0]);
-  } catch (err) { if (err.code === '23503') {
-    return res.status(409).json({ message: 'Violación de clave foránea: verifica id_categoria / id_marca' });
-  }
+    const newProduct = rows[0];
+
+    // Auditoría: creación de producto
+    await pool.query(
+      `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
+       VALUES ($1, 'producto', 'PRODUCT_CREATE', $2::jsonb, NOW())`,
+      [
+        req.user.id || req.user.sub,
+        JSON.stringify({
+          id_producto: newProduct.id_producto,
+          data: req.body || {}
+        })
+      ]
+    );
+
+    res.status(201).json(newProduct);
+  } catch (err) { 
+    if (err.code === '23503') {
+      return res.status(409).json({ message: 'Violación de clave foránea: verifica id_categoria / id_marca' });
+    }
     next(err);
   }
-
-  // Auditoría: creación de producto (sin target_producto_id)
-await client.query(
-  `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
-   VALUES ($1, 'producto', 'PRODUCT_CREATE', $2::jsonb, NOW())`,
-  [
-    req.user.id || req.user.sub,
-    JSON.stringify({
-      id_producto: producto.id_producto,
-      data: req.body || {}
-    })
-  ]
-);
 
 });
 
@@ -87,26 +90,29 @@ router.put('/products/:id', requireAuth, requireRole('admin','manager'), async (
        RETURNING id_producto, id_categoria, id_marca, nombre, sku_base, descripcion, activo, fecha_creacion`,
       [id, id_categoria, id_marca, nombre, sku_base, descripcion, activo]
     );
-    if (!rows[0]) return res.status(404).json({ message: 'No encontrado' });
-    res.json(rows[0]);
+    const updatedProduct = rows[0];
+    if (!updatedProduct) return res.status(404).json({ message: 'No encontrado' });
+
+    // Auditoría: actualización de producto
+    await pool.query(
+      `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
+       VALUES ($1, 'producto', 'PRODUCT_UPDATE', $2::jsonb, NOW())`,
+      [
+        req.user.id || req.user.sub,
+        JSON.stringify({
+          id_producto: updatedProduct.id_producto,
+          changes: req.body || {}
+        })
+      ]
+    );
+
+    res.json(updatedProduct);
   } catch (err) {
     if (err.code === '23503') {
       return res.status(409).json({ message: 'Violación de clave foránea: verifica id_categoria / id_marca' });
     }
     next(err);
   }
-  // Auditoría: actualización de producto (sin target_producto_id)
-await client.query(
-  `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
-   VALUES ($1, 'producto', 'PRODUCT_UPDATE', $2::jsonb, NOW())`,
-  [
-    req.user.id || req.user.sub,
-    JSON.stringify({
-      id_producto: actualizado.id_producto,
-      changes: req.body || {}
-    })
-  ]
-);
 
 });
 
@@ -121,21 +127,23 @@ router.delete('/products/:id', requireAuth, requireRole('admin','manager'), asyn
        RETURNING id_producto`,
       [id]
     );
-    if (!rows[0]) return res.status(404).json({ message: 'No encontrado' });
+    const deletedProduct = rows[0];
+    if (!deletedProduct) return res.status(404).json({ message: 'No encontrado' });
+
+    // Auditoría: desactivación de producto
+    await pool.query(
+      `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
+       VALUES ($1, 'producto', 'PRODUCT_DISABLE', $2::jsonb, NOW())`,
+      [
+        req.user.id || req.user.sub,
+        JSON.stringify({ id_producto: deletedProduct.id_producto })
+      ]
+    );
+
     res.status(204).send();
   } catch (err) {
     next(err);
-  
   }
-  // Auditoría: desactivación de producto (sin target_producto_id)
-await client.query(
-  `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
-   VALUES ($1, 'producto', 'PRODUCT_DISABLE', $2::jsonb, NOW())`,
-  [
-    req.user.id || req.user.sub,
-    JSON.stringify({ id_producto: rows[0].id_producto })
-  ]
-);
 
 });
 
