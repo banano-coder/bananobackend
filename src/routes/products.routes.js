@@ -8,9 +8,21 @@ const router = Router();
 router.get('/products', async (_req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id_producto, id_categoria, id_marca, nombre, descripcion, activo, fecha_creacion
-      FROM producto
-       ORDER BY fecha_creacion DESC`
+      `SELECT 
+        p.id_producto, 
+        p.id_categoria, 
+        p.id_marca, 
+        p.nombre, 
+        p.sku_base, 
+        p.descripcion, 
+        p.activo, 
+        p.fecha_creacion,
+        c.nombre as category_name,
+        m.nombre as brand_name
+      FROM producto p
+      LEFT JOIN categoria c ON p.id_categoria = c.id_categoria
+      LEFT JOIN marca m ON p.id_marca = m.id_marca
+      ORDER BY p.fecha_creacion DESC`
     );
     res.json(rows);
   } catch (err) {
