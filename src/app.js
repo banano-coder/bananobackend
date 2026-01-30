@@ -18,6 +18,7 @@ const variantsRoutes = require('./routes/variants.routes');
 const categoriesRoutes = require('./routes/categories.routes');
 const brandsRoutes = require('./routes/brands.routes');
 const reportsRoutes = require('./routes/reports.routes');
+const configRoutes = require('./routes/config.routes');
 const { notFound, errorHandler } = require('./middlewares/error.middleware');
 
 const app = express();
@@ -37,13 +38,14 @@ app.use('/api', usersRoutes);
 app.use('/api', catalogRoutes);
 app.use('/api', pedidosRoutes)
 app.use('/api', inventarioRoutes);
-app.use('/uploads', (req,res,next)=>{ res.setHeader('Cache-Control','public, max-age=31536000'); next(); });
+app.use('/uploads', (req, res, next) => { res.setHeader('Cache-Control', 'public, max-age=31536000'); next(); });
 app.use('/uploads', require('express').static(path.join(__dirname, '..', 'uploads')));
 app.use('/api', imagesRoutes);
 app.use('/api', variantsRoutes);
 app.use('/api', brandsRoutes);
 app.use('/api', categoriesRoutes);
 app.use('/api/', reportsRoutes);
+app.use('/api/', configRoutes);
 
 // 404 & errores
 app.use(notFound);

@@ -76,7 +76,7 @@ router.post('/users', requireAuth, requireRole('admin'), async (req, res, next) 
 
     res.status(201).json({ message: 'Usuario creado', user: { ...user, roles: [rolAsignar] } });
   } catch (err) {
-    await pool.query('ROLLBACK').catch(()=>{});
+    await pool.query('ROLLBACK').catch(() => { });
     next(err);
   } finally {
     // eslint-disable-next-line no-unsafe-finally
@@ -93,7 +93,7 @@ router.get('/users', requireAuth, requireRole('admin'), async (req, res, next) =
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
     const offset = (page - 1) * limit;
 
-    const allowedSort = new Set(['created_at','nombre','email','activo','id_usuario']);
+    const allowedSort = new Set(['created_at', 'nombre', 'email', 'activo', 'id_usuario']);
     const sort = allowedSort.has(req.query.sort) ? req.query.sort : 'id_usuario';
     const dir = (req.query.dir || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
 
@@ -171,7 +171,7 @@ router.patch('/users/:id/roles', requireAuth, requireRole('admin'), async (req, 
     await client.query('COMMIT');
     res.json({ message: 'Roles actualizados', roles });
   } catch (err) {
-    await pool.query('ROLLBACK').catch(()=>{});
+    await pool.query('ROLLBACK').catch(() => { });
     next(err);
   } finally {
     client.release();
@@ -224,7 +224,7 @@ router.patch('/users/:id/status', requireAuth, requireRole('admin'), async (req,
     await client.query('COMMIT');
     res.json({ message: 'Estado actualizado', activo });
   } catch (err) {
-    await pool.query('ROLLBACK').catch(()=>{});
+    await pool.query('ROLLBACK').catch(() => { });
     next(err);
   } finally {
     client.release();
@@ -251,7 +251,7 @@ router.patch('/users/:id/password', requireAuth, requireRole('admin'), async (re
     if (!rowCount) return res.status(404).json({ message: 'Usuario no encontrado' });
 
     await pool.query(
-    `INSERT INTO public.auditoria (actor_id, target_usuario_id, action, payload)
+      `INSERT INTO public.auditoria (actor_id, target_usuario_id, action, payload)
        VALUES ($1, $2, 'RESET_PASSWORD', $3::jsonb)`,
       [req.user.id || req.user.sub, targetId, JSON.stringify({ by: 'admin' })]
     );
@@ -262,5 +262,73 @@ router.patch('/users/:id/password', requireAuth, requireRole('admin'), async (re
   }
 });
 
+
+// 6) DELETE: DELETE /api/users/:id (solo admin)
+// Realiza un borrado físico (HARD DELETE)
+router.delete('/users/:id', requireAuth, requireRole('admin'), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const targetId = parseInt(req.params.id, 10);
+    if (!targetId) return res.status(400).json({ message: 'ID de usuario inválido' });
+
+    await client.query('BEGIN');
+
+    // Protección: no borrar al último admin activo
+    const roles = await getUserRoles(targetId, client);
+    if (roles.includes('admin')) {
+      const admins = await countActiveAdmins(client);
+      if (admins <= 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: 'No puedes eliminar al último admin activo del sistema' });
+      }
+    }
+
+    // 1. Eliminar asociaciones de roles
+    await client.query(`DELETE FROM public.usuario_rol WHERE id_usuario = $1`, [targetId]);
+
+    // 2. Limpiar referencias en pedidos (vendedor asignado)
+    // Usamos UPDATE para no borrar el pedido, solo quitar la referencia al usuario
+    await client.query(
+      `UPDATE public.pedido SET empleado_asignado = NULL WHERE empleado_asignado = $1`,
+      [targetId]
+    );
+
+    // 3. Limpiar referencias en auditoría para evitar errores de FK si existen
+    await client.query(
+      `UPDATE public.auditoria SET actor_id = NULL WHERE actor_id = $1`,
+      [targetId]
+    );
+    await client.query(
+      `UPDATE public.auditoria SET target_usuario_id = NULL WHERE target_usuario_id = $1`,
+      [targetId]
+    );
+
+    // 4. Borrar el usuario físicamente
+    const { rowCount } = await client.query(
+      `DELETE FROM public.usuario WHERE id_usuario = $1`,
+      [targetId]
+    );
+
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+
+    // Auditoría del borrado (el actor_id será el del admin que borra)
+    await client.query(
+      `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload)
+       VALUES ($1, 'usuario', 'HARD_DELETE_USER', $2::jsonb)`,
+      [req.user.id || req.user.sub, JSON.stringify({ deleted_user_id: targetId })]
+    );
+
+    await client.query('COMMIT');
+    res.status(204).send();
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => { });
+    next(err);
+  } finally {
+    client.release();
+  }
+});
 
 module.exports = router;

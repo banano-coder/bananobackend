@@ -147,12 +147,12 @@ router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
     // autorización por tipo
     const roles = req.user?.roles || [];
     const canEntrada = roles.some(r => r === 'admin' || r === 'manager');
-    const canSalida  = roles.some(r => r === 'admin' || r === 'manager' || r === 'vendedor');
-    const canAjuste  = roles.some(r => r === 'admin' || r === 'manager');
+    const canSalida = roles.some(r => r === 'admin' || r === 'manager' || r === 'vendedor');
+    const canAjuste = roles.some(r => r === 'admin' || r === 'manager');
 
     if (tipo === 'entrada' && !canEntrada) return res.status(403).json({ message: 'No autorizado (entrada)' });
-    if (tipo === 'salida'  && !canSalida)  return res.status(403).json({ message: 'No autorizado (salida)' });
-    if (tipo === 'ajuste'  && !canAjuste)  return res.status(403).json({ message: 'No autorizado (ajuste)' });
+    if (tipo === 'salida' && !canSalida) return res.status(403).json({ message: 'No autorizado (salida)' });
+    if (tipo === 'ajuste' && !canAjuste) return res.status(403).json({ message: 'No autorizado (ajuste)' });
 
     const idVar = parseInt(id_variante_producto, 10);
     if (!Number.isInteger(idVar) || idVar <= 0) return res.status(400).json({ message: 'id_variante_producto inválido' });
@@ -191,7 +191,7 @@ router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
       stock_despues: result.stockDespues
     });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     if (err.status) return res.status(err.status).json({ message: err.message });
     next(err);
   } finally { client.release(); }
@@ -202,12 +202,12 @@ router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
  * Roles: admin, manager
  * (si quieres que vendedor vea solo 'salida', avísame y filtro)
  */
-router.get('/inventario/movimientos', requireAuth, requireRole('admin','manager'), async (req, res, next) => {
+router.get('/inventario/movimientos', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
   try {
     const tipo = (req.query.tipo || '').trim();
     const idVar = parseInt(req.query.id_variante || '0', 10);
     const from = (req.query.from || '').trim();
-    const to   = (req.query.to || '').trim();
+    const to = (req.query.to || '').trim();
     const page = Math.max(1, parseInt(req.query.page || '1', 10));
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
     const offset = (page - 1) * limit;
@@ -216,10 +216,10 @@ router.get('/inventario/movimientos', requireAuth, requireRole('admin','manager'
     const params = [];
     let i = 1;
 
-    if (tipo)  { conds.push(`m.tipo = $${i++}`); params.push(tipo); }
+    if (tipo) { conds.push(`m.tipo = $${i++}`); params.push(tipo); }
     if (idVar) { conds.push(`m.id_variante_producto = $${i++}`); params.push(idVar); }
-    if (from)  { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
-    if (to)    { conds.push(`m.created_at < ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+    if (from) { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
+    if (to) { conds.push(`m.created_at < ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
 
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
@@ -235,9 +235,12 @@ router.get('/inventario/movimientos', requireAuth, requireRole('admin','manager'
       `SELECT m.id_movimiento_inventario, m.id_variante_producto, m.tipo, m.cantidad,
               m.motivo, m.ref_externa, m.costo_unitario,
               m.id_usuario, u.nombre AS usuario_nombre,
+              v.sku, p.nombre AS producto_nombre,
               m.created_at
          FROM public.movimiento_inventario m
          LEFT JOIN public.usuario u ON u.id_usuario = m.id_usuario
+         JOIN public.variante_producto v ON v.id_variante_producto = m.id_variante_producto
+         JOIN public.producto p          ON p.id_producto = v.id_producto
         ${where}
         ORDER BY m.created_at DESC
         LIMIT ${limit} OFFSET ${offset}`,
@@ -249,7 +252,7 @@ router.get('/inventario/movimientos', requireAuth, requireRole('admin','manager'
 });
 
 /** GET /api/inventario/stock/:id */
-router.get('/inventario/stock/:id', requireAuth, requireRole('admin','manager','vendedor'), async (req, res, next) => {
+router.get('/inventario/stock/:id', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   try {
     const idVar = parseInt(req.params.id, 10);
     if (!Number.isInteger(idVar) || idVar <= 0) return res.status(400).json({ message: 'id inválido' });

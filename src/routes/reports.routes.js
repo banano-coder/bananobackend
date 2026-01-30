@@ -6,7 +6,84 @@ const router = Router();
 
 // Helpers
 function parseDate(s) { return (s || '').trim(); }
-function toInt(v, d=10) { const n = parseInt(v,10); return Number.isFinite(n) ? n : d; }
+function toInt(v, d = 10) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : d; }
+
+// Etiquetas legibles para acciones de auditoría
+const ACTION_LABELS = {
+  CREATE_USER: 'Creó usuario',
+  CREATE_USER_SIGNUP: 'Signup de usuario',
+  REPLACE_ROLES: 'Actualizó roles',
+  RESET_PASSWORD: 'Reseteó contraseña',
+  ENABLE: 'Activó usuario',
+  DISABLE: 'Desactivó usuario',
+  PRODUCT_CREATE: 'Creó producto',
+  PRODUCT_UPDATE: 'Actualizó producto',
+  PRODUCT_DISABLE: 'Desactivó producto',
+  CAT_CREATE: 'Creó categoría',
+  CAT_UPDATE: 'Actualizó categoría',
+  CAT_DISABLE: 'Desactivó categoría',
+  BRAND_CREATE: 'Creó marca',
+  BRAND_UPDATE: 'Actualizó marca',
+  BRAND_DISABLE: 'Desactivó marca',
+  VARIANT_CREATE: 'Creó variante',
+  VARIANT_UPDATE: 'Actualizó variante',
+  VARIANT_PRICE_CHANGE: 'Cambio de precio/costo',
+  VARIANT_DISABLE: 'Desactivó variante',
+  INV_ENTRADA: 'Entrada de inventario',
+  INV_SALIDA: 'Salida de inventario',
+  INV_AJUSTE: 'Ajuste de inventario',
+  PEDIDO_CREAR: 'Creó pedido',
+  PEDIDO_CAMBIAR_ESTADO: 'Cambió estado de pedido',
+  USUARIO_UPDATE_PERFIL: 'Actualizó perfil',
+  USUARIO_UPDATE_PASSWORD: 'Cambió contraseña'
+};
+
+// Resumen legible del payload según acción
+function formatDetail(action, payload) {
+  if (!payload) return '';
+  let data = payload;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return payload; }
+  }
+
+  switch (action) {
+    case 'REPLACE_ROLES':
+      return data.roles ? `Roles: ${data.roles.join(', ')}` : '';
+    case 'ENABLE':
+    case 'DISABLE':
+      return data.activo !== undefined ? `Activo: ${data.activo}` : '';
+    case 'RESET_PASSWORD':
+      return data.by ? `Reseteada por: ${data.by}` : '';
+    case 'CREATE_USER_SIGNUP':
+    case 'CREATE_USER':
+      return data.email ? `Email: ${data.email} | Rol: ${data.rol || data.roles}` : '';
+    case 'VARIANT_UPDATE':
+      return data.changes ? `Cambios: ${JSON.stringify(data.changes)}` : '';
+    case 'VARIANT_PRICE_CHANGE':
+      return data.prev || data.next
+        ? `Precio ${JSON.stringify(data.prev || {})} → ${JSON.stringify(data.next || {})}`
+        : '';
+    case 'VARIANT_DISABLE':
+    case 'VARIANT_CREATE':
+      return data.sku ? `SKU: ${data.sku}` : '';
+    case 'INV_ENTRADA':
+    case 'INV_SALIDA':
+    case 'INV_AJUSTE':
+      return data.cantidad
+        ? `Cant: ${data.cantidad} | Stock ${data.stock_antes} → ${data.stock_despues}`
+        : '';
+    case 'PEDIDO_CREAR':
+      return data.total !== undefined ? `Total: ${data.total} | Items: ${data.items?.length || 0}` : '';
+    case 'PEDIDO_CAMBIAR_ESTADO':
+      return data.estado ? `Estado: ${data.estado}` : '';
+    case 'USUARIO_UPDATE_PERFIL':
+      return `Nombre: ${data.nombre} | Email: ${data.email}`;
+    case 'USUARIO_UPDATE_PASSWORD':
+      return 'Contraseña actualizada por el usuario';
+    default:
+      return typeof data === 'object' ? JSON.stringify(data) : String(data);
+  }
+}
 
 /**
  * 1) KPIs de pedidos (resumen)
@@ -18,17 +95,17 @@ function toInt(v, d=10) { const n = parseInt(v,10); return Number.isFinite(n) ? 
  * - ticket_promedio (monto_total_estimado / concretados)
  */
 router.get('/reports/pedidos/kpis',
-  requireAuth, requireRole('admin','manager'),
-  async (req,res,next)=>{
-    try{
+  requireAuth, requireRole('admin', 'manager'),
+  async (req, res, next) => {
+    try {
       const from = parseDate(req.query.from);
-      const to   = parseDate(req.query.to);
+      const to = parseDate(req.query.to);
 
       const conds = [];
       const params = [];
-      let i=1;
+      let i = 1;
       if (from) { conds.push(`p.created_at >= $${i++}::timestamptz`); params.push(from); }
-      if (to)   { conds.push(`p.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+      if (to) { conds.push(`p.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
       const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
       const { rows } = await pool.query(
@@ -54,11 +131,11 @@ router.get('/reports/pedidos/kpis',
         params
       );
 
-      const k = rows[0] || { total_pedidos:0, total_concretados:0, monto_total_estimado:0, ticket_promedio:0 };
+      const k = rows[0] || { total_pedidos: 0, total_concretados: 0, monto_total_estimado: 0, ticket_promedio: 0 };
       const conversion = k.total_pedidos ? +(k.total_concretados / k.total_pedidos).toFixed(2) : 0;
 
       res.json({ ...k, conversion });
-    }catch(err){ next(err); }
+    } catch (err) { next(err); }
   }
 );
 
@@ -68,19 +145,19 @@ router.get('/reports/pedidos/kpis',
  * Devuelve: fecha (inicio), total, concretados, monto_concretado
  */
 router.get('/reports/pedidos/serie',
-  requireAuth, requireRole('admin','manager'),
-  async (req,res,next)=>{
-    try{
+  requireAuth, requireRole('admin', 'manager'),
+  async (req, res, next) => {
+    try {
       const from = parseDate(req.query.from);
-      const to   = parseDate(req.query.to);
+      const to = parseDate(req.query.to);
       const g = graw ? String(graw).trim().toLowerCase() : 'month';
       const gran = (g === 'day' || g === 'month' || g === 'year') ? g : 'month';
 
       const conds = [];
       const params = [];
-      let i=1;
+      let i = 1;
       if (from) { conds.push(`p.created_at >= $${i++}::timestamptz`); params.push(from); }
-      if (to)   { conds.push(`p.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+      if (to) { conds.push(`p.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
       const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
       const { rows } = await pool.query(
@@ -98,13 +175,15 @@ router.get('/reports/pedidos/serie',
         params
       );
 
-      res.json({ granularity: gran, data: rows.map(r => ({
-        periodo: r.periodo.toISOString(),
-        total: r.total,
-        concretados: r.concretados,
-        monto_concretado: r.monto_concretado
-      })) });
-    }catch(err){ next(err); }
+      res.json({
+        granularity: gran, data: rows.map(r => ({
+          periodo: r.periodo.toISOString(),
+          total: r.total,
+          concretados: r.concretados,
+          monto_concretado: r.monto_concretado
+        }))
+      });
+    } catch (err) { next(err); }
   }
 );
 
@@ -114,18 +193,18 @@ router.get('/reports/pedidos/serie',
  * Agrupa por producto/variante y ordena por cantidad total salida.
  */
 router.get('/reports/inventario/top-salidas',
-  requireAuth, requireRole('admin','manager'),
-  async (req,res,next)=>{
-    try{
+  requireAuth, requireRole('admin', 'manager'),
+  async (req, res, next) => {
+    try {
       const from = parseDate(req.query.from);
-      const to   = parseDate(req.query.to);
+      const to = parseDate(req.query.to);
       const limit = toInt(req.query.limit, 10);
 
       const conds = [`m.tipo='salida'`];
       const params = [];
-      let i=1;
+      let i = 1;
       if (from) { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
-      if (to)   { conds.push(`m.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+      if (to) { conds.push(`m.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
       const where = `WHERE ${conds.join(' AND ')}`;
 
       const { rows } = await pool.query(
@@ -148,7 +227,7 @@ router.get('/reports/inventario/top-salidas',
       );
 
       res.json({ data: rows });
-    }catch(err){ next(err); }
+    } catch (err) { next(err); }
   }
 );
 
@@ -158,18 +237,18 @@ router.get('/reports/inventario/top-salidas',
  * Cuenta y suma cantidades de salidas.
  */
 router.get('/reports/inventario/salidas-serie',
-  requireAuth, requireRole('admin','manager'),
-  async (req,res,next)=>{
-    try{
+  requireAuth, requireRole('admin', 'manager'),
+  async (req, res, next) => {
+    try {
       const from = parseDate(req.query.from);
-      const to   = parseDate(req.query.to);
+      const to = parseDate(req.query.to);
       const gran = (req.query.granularity || 'month').toLowerCase() === 'day' ? 'day' : 'month';
 
       const conds = [`m.tipo='salida'`];
       const params = [];
-      let i=1;
+      let i = 1;
       if (from) { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
-      if (to)   { conds.push(`m.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+      if (to) { conds.push(`m.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
       const where = `WHERE ${conds.join(' AND ')}`;
 
       const { rows } = await pool.query(
@@ -186,12 +265,14 @@ router.get('/reports/inventario/salidas-serie',
         params
       );
 
-      res.json({ granularity: gran, data: rows.map(r => ({
-        periodo: r.periodo.toISOString(),
-        movimientos: r.movimientos,
-        unidades: r.unidades
-      })) });
-    }catch(err){ next(err); }
+      res.json({
+        granularity: gran, data: rows.map(r => ({
+          periodo: r.periodo.toISOString(),
+          movimientos: r.movimientos,
+          unidades: r.unidades
+        }))
+      });
+    } catch (err) { next(err); }
   }
 );
 
@@ -202,9 +283,9 @@ router.get('/reports/inventario/salidas-serie',
  * - Filtra variantes y productos activos con stock <= threshold.
  */
 router.get('/reports/alertas/stock-bajo',
-  requireAuth, requireRole('admin','manager'),
-  async (req,res,next)=>{
-    try{
+  requireAuth, requireRole('admin', 'manager'),
+  async (req, res, next) => {
+    try {
       const threshold = toInt(req.query.threshold, 5);
 
       const { rows } = await pool.query(
@@ -229,7 +310,7 @@ router.get('/reports/alertas/stock-bajo',
       );
 
       res.json({ threshold, data: rows });
-    }catch(err){ next(err); }
+    } catch (err) { next(err); }
   }
 );
 
@@ -287,18 +368,77 @@ router.get('/auditoria',
       );
       const total = tot[0]?.total || 0;
 
-      const { rows: data } = await pool.query(
+      const { rows } = await pool.query(
         `
-        SELECT a.id_auditoria, a.created_at, a.actor_id,
-               a.target_tipo, a.target_pedido_id, a.target_usuario_id,
-               a.action, a.payload
-          FROM public.auditoria a
-          ${where}
-         ORDER BY a.created_at DESC
-         LIMIT ${limit} OFFSET ${offset}
+        SELECT
+          a.id,
+          a.created_at,
+          a.actor_id,
+          ua.nombre  AS actor_nombre,
+          ua.email   AS actor_email,
+          a.target_tipo,
+          a.target_pedido_id,
+          a.target_usuario_id,
+          ut.nombre  AS target_usuario_nombre,
+          ut.email   AS target_usuario_email,
+          p.cliente_nombre AS target_pedido_cliente,
+          pr.nombre AS target_producto_nombre,
+          vp.sku AS target_variante_sku,
+          a.action,
+          a.payload
+        FROM public.auditoria a
+        LEFT JOIN public.usuario ua ON ua.id_usuario = a.actor_id
+        LEFT JOIN public.usuario ut ON ut.id_usuario = a.target_usuario_id
+        LEFT JOIN public.pedido p   ON p.id_pedido   = a.target_pedido_id
+        LEFT JOIN public.producto pr ON pr.id_producto = (a.payload->>'id_producto')::int
+        LEFT JOIN public.variante_producto vp ON vp.id_variante_producto = (a.payload->>'id_variante_producto')::int
+        ${where}
+        ORDER BY a.created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
         `,
         params
       );
+
+      // arma estructuras amigables para frontend
+      const data = rows.map(r => ({
+        id: r.id,
+        created_at: r.created_at,
+        actor_id: r.actor_id,
+        actor_nombre: r.actor_nombre,
+        actor_email: r.actor_email,
+        actor: r.actor_id ? {
+          id: r.actor_id,
+          nombre: r.actor_nombre,
+          email: r.actor_email
+        } : null,
+        target_tipo: r.target_tipo,
+        target_pedido_id: r.target_pedido_id,
+        target_usuario_id: r.target_usuario_id,
+        target_usuario_nombre: r.target_usuario_nombre,
+        target_usuario_email: r.target_usuario_email,
+        target_pedido_cliente: r.target_pedido_cliente,
+        target_producto_nombre: r.target_producto_nombre,
+        target_variante_sku: r.target_variante_sku,
+        target_usuario: r.target_usuario_id ? {
+          id: r.target_usuario_id,
+          nombre: r.target_usuario_nombre,
+          email: r.target_usuario_email
+        } : null,
+        target_label: (() => {
+          if (r.target_tipo === 'pedido' && r.target_pedido_id) return `Pedido #${r.target_pedido_id}`;
+          if (r.target_tipo === 'usuario' || r.target_usuario_id) return `Usuario: ${r.target_usuario_nombre || r.target_usuario_id || ''}`;
+          if (r.target_tipo === 'producto' && r.target_producto_nombre) return `Producto: ${r.target_producto_nombre}`;
+          if ((r.target_tipo === 'variante' || r.target_tipo === 'variante_producto' || r.target_tipo === 'inventario') && r.target_variante_sku) return `Variante: ${r.target_variante_sku}`;
+
+          // Fallback
+          const id = r.target_pedido_id || r.target_usuario_id || (r.payload?.id_producto) || (r.payload?.id_variante_producto);
+          return `${r.target_tipo}${id ? ` #${id}` : ''}`;
+        })(),
+        action: r.action,
+        action_label: ACTION_LABELS[r.action] || r.action,
+        payload: r.payload,
+        detail: formatDetail(r.action, r.payload)
+      }));
 
       res.json({ data, page, limit, total });
     } catch (err) { next(err); }

@@ -12,10 +12,13 @@ const BANANO_WA = process.env.BANANO_WA || '584129326373';
 function toInt(v, def) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : def; }
 function toFloat(v, def) { const n = parseFloat(v); return Number.isFinite(n) ? n : def; }
 
-// Arma texto de WhatsApp (sin teléfono del cliente)
-function buildWaText({ id_pedido, cliente_nombre, items, total, nota }) {
+// Arma texto de WhatsApp
+function buildWaText({ id_pedido, cliente_nombre, cliente_email, cliente_telefono, items, total, nota, welcomeMessage }) {
+  const intro = welcomeMessage || '¡Hola! Me interesa este producto de Banano Shop.';
   const header = `Consulta de pedido #${id_pedido}`;
-  const cliente = cliente_nombre ? `Nombre: ${cliente_nombre}` : '';
+  let cliente = `Nombre: ${cliente_nombre}`;
+  if (cliente_email) cliente += `\nEmail: ${cliente_email}`;
+  if (cliente_telefono) cliente += `\nTel: ${cliente_telefono}`;
 
   const lineas = items.map(it => {
     const sku = it.sku ? ` (${it.sku})` : '';
@@ -26,7 +29,7 @@ function buildWaText({ id_pedido, cliente_nombre, items, total, nota }) {
   const totalTxt = `Total estimado: $${Number(total || 0).toFixed(2)}`;
   const notaTxt = nota ? `\nNota: ${nota}` : '';
 
-  return [header, cliente, lineas, totalTxt]
+  return [intro, header, cliente, lineas, totalTxt]
     .filter(Boolean)
     .map(s => s.trim())
     .filter(s => s.length > 0)
@@ -56,7 +59,7 @@ function buildWaLink(phone, text) {
 router.post('/guest/checkout', async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const { items, cliente_nombre, nota } = req.body || {};
+    const { items, cliente_nombre, cliente_email, cliente_telefono, nota } = req.body || {};
 
     // Validaciones básicas
     if (!Array.isArray(items) || items.length === 0) {
@@ -72,12 +75,12 @@ router.post('/guest/checkout', async (req, res, next) => {
       const it = items[i] || {};
       const rawId = it.id_variante_producto ?? it.id_variante ?? it.id;
       const idVar = Number.parseInt(rawId, 10);
-      const qty   = Number.parseInt(it.cantidad, 10);
+      const qty = Number.parseInt(it.cantidad, 10);
       if (!Number.isInteger(idVar) || idVar <= 0) {
-        return res.status(400).json({ status: 'error', message: `Cada item debe tener id_variante válido (ítem ${i+1})` });
+        return res.status(400).json({ status: 'error', message: `Cada item debe tener id_variante válido (ítem ${i + 1})` });
       }
       if (!Number.isInteger(qty) || qty <= 0) {
-        return res.status(400).json({ status: 'error', message: `Cantidad inválida para el ítem ${i+1}` });
+        return res.status(400).json({ status: 'error', message: `Cantidad inválida para el ítem ${i + 1}` });
       }
       normItems.push({ id_variante_producto: idVar, cantidad: qty });
     }
@@ -115,11 +118,11 @@ router.post('/guest/checkout', async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    // Crear pedido (sin teléfono)
+    // Crear pedido con email y teléfono
     const { rows: ped } = await client.query(
-      `INSERT INTO public.pedido (cliente_nombre, observacion, estado)
-       VALUES ($1, $2, 'nuevo') RETURNING id_pedido`,
-      [cliente_nombre, nota || null]
+      `INSERT INTO public.pedido (cliente_nombre, cliente_email, cliente_telefono, observacion, estado)
+       VALUES ($1, $2, $3, $4, 'nuevo') RETURNING id_pedido`,
+      [cliente_nombre, cliente_email || null, cliente_telefono || null, nota || null]
     );
     const id_pedido = ped[0].id_pedido;
 
@@ -129,7 +132,7 @@ router.post('/guest/checkout', async (req, res, next) => {
     for (const it of normItems) {
       const v = mapVar.get(Number(it.id_variante_producto));
       const unit = Number(v.precio_lista);
-      const sub  = +(unit * it.cantidad).toFixed(2);
+      const sub = +(unit * it.cantidad).toFixed(2);
 
       await client.query(
         `INSERT INTO public.pedido_item (id_pedido, id_variante_producto, nombre_producto, sku, cantidad, precio_unitario, subtotal)
@@ -148,35 +151,44 @@ router.post('/guest/checkout', async (req, res, next) => {
       });
     }
 
-    // Auditoría (actor_id NULL por invitado)
+    // Auditoría
     await client.query(
       `INSERT INTO public.auditoria (actor_id, target_pedido_id, target_tipo, action, payload, created_at)
        VALUES ($1, $2, 'pedido', 'PEDIDO_CREAR', $3::jsonb, NOW())`,
-      [null, id_pedido, JSON.stringify({ cliente_nombre, total, items: normItems })]
+      [null, id_pedido, JSON.stringify({ cliente_nombre, cliente_email, cliente_telefono, total, items: normItems })]
     );
 
-    // Generar mensaje y link WA (siempre a Banano)
+    // Obtener configuración de WhatsApp dinámica
+    const { rows: waConfig } = await client.query('SELECT valor FROM public.configuracion WHERE clave = $1', ['whatsapp']);
+    const waData = waConfig[0]?.valor || {};
+    const targetPhone = waData.numero || BANANO_WA;
+    const welcomeMsg = waData.mensaje_bienvenida;
+
+    // Generar mensaje y link WA
     const texto = buildWaText({
       id_pedido,
       cliente_nombre,
+      cliente_email,
+      cliente_telefono,
       items: snapshotItems,
       total,
-      nota
+      nota,
+      welcomeMessage: welcomeMsg
     });
-    const waUrl = buildWaLink(BANANO_WA, texto);
+    const waUrl = buildWaLink(targetPhone, texto);
 
-    // (Opcional) guardar snapshot WA
+    // Guardar snapshot WA y total_estimado (importante para el dashboard)
     await client.query(
       `UPDATE public.pedido
-         SET whatsapp_text = $2, whatsapp_link = $3, updated_at = NOW()
+         SET whatsapp_text = $2, whatsapp_link = $3, total_estimado = $4, updated_at = NOW()
        WHERE id_pedido = $1`,
-      [id_pedido, texto, waUrl]
+      [id_pedido, texto, waUrl, total]
     );
 
     await client.query('COMMIT');
     return res.status(201).json({ id_pedido, waUrl });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch { }
     next(err);
   } finally {
     client.release();
@@ -188,7 +200,7 @@ router.post('/guest/checkout', async (req, res, next) => {
  * GET /api/pedidos?estado=&from=&to=&search=&page=1&limit=20
  * (search solo por nombre ahora)
  */
-router.get('/pedidos', requireAuth, requireRole('admin','manager'), async (req, res, next) => {
+router.get('/pedidos', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
   try {
     const estado = (req.query.estado || '').trim();
     const from = (req.query.from || '').trim();
@@ -203,17 +215,17 @@ router.get('/pedidos', requireAuth, requireRole('admin','manager'), async (req, 
     let i = 1;
 
     if (estado) { conds.push(`p.estado = $${i++}`); params.push(estado); }
-    if (from)   { conds.push(`p.created_at >= $${i++}::timestamptz`); params.push(from); }
-    if (to)     { conds.push(`p.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+    if (from) { conds.push(`p.created_at >= $${i++}::timestamptz`); params.push(from); }
+    if (to) { conds.push(`p.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
     if (search) {
       conds.push(`(p.cliente_nombre ILIKE $${i})`);
       params.push(`%${search}%`); i++;
     }
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
-    const allowedSort = new Set(['created_at','estado','total']);
-    const sort = allowedSort.has((req.query.sort||'').toLowerCase()) ? req.query.sort.toLowerCase() : 'created_at';
-    const dir  = (req.query.dir||'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+    const allowedSort = new Set(['created_at', 'estado', 'total']);
+    const sort = allowedSort.has((req.query.sort || '').toLowerCase()) ? req.query.sort.toLowerCase() : 'created_at';
+    const dir = (req.query.dir || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
     const sortCol = sort === 'total' ? 'p.total_estimado' : sort === 'estado' ? 'p.estado' : 'p.created_at';
 
 
@@ -222,7 +234,7 @@ router.get('/pedidos', requireAuth, requireRole('admin','manager'), async (req, 
 
     const { rows: data } = await pool.query(
       `
-      SELECT p.id_pedido, p.origen, p.cliente_nombre,
+      SELECT p.id_pedido, p.origen, p.cliente_nombre, p.cliente_email, p.cliente_telefono,
              p.total_estimado::float AS total_estimado, p.estado, p.created_at, p.updated_at
       FROM public.pedido p
       ${where}
@@ -239,14 +251,14 @@ router.get('/pedidos', requireAuth, requireRole('admin','manager'), async (req, 
 });
 
 /** 3) Detalle (admin/manager) */
-router.get('/pedidos/:id', requireAuth, requireRole('admin','manager'), async (req, res, next) => {
+router.get('/pedidos/:id', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
   try {
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ message: 'id inválido' });
 
     const { rows: head } = await pool.query(
       `
-      SELECT id_pedido, origen, cliente_nombre,
+      SELECT id_pedido, origen, cliente_nombre, cliente_email, cliente_telefono,
              total_estimado::float AS total_estimado, estado, whatsapp_text, whatsapp_link,
              observacion, empleado_asignado, created_at, updated_at
       FROM public.pedido WHERE id_pedido = $1
@@ -274,12 +286,12 @@ router.get('/pedidos/:id', requireAuth, requireRole('admin','manager'), async (r
  * Body: { "estado": "contactado|concretado|cancelado" }
  * Auditoría: PEDIDO_CAMBIAR_ESTADO
  */
-router.patch('/pedidos/:id/estado', requireAuth, requireRole('admin','manager','vendedor'), async (req, res, next) => {
+router.patch('/pedidos/:id/estado', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   const client = await pool.connect();
   try {
     const id = toInt(req.params.id, 0);
     const estado = String(req.body?.estado || '').trim();
-    const valid = new Set(['nuevo','contactado','concretado','cancelado']);
+    const valid = new Set(['nuevo', 'contactado', 'concretado', 'cancelado']);
     if (!id) return res.status(400).json({ message: 'id inválido' });
     if (!valid.has(estado)) return res.status(400).json({ message: 'estado inválido' });
 
@@ -303,7 +315,7 @@ router.patch('/pedidos/:id/estado', requireAuth, requireRole('admin','manager','
     await client.query('COMMIT');
     res.json({ message: 'Estado actualizado', estado });
   } catch (err) {
-    await pool.query('ROLLBACK').catch(()=>{});
+    try { await client.query('ROLLBACK'); } catch { }
     next(err);
   } finally {
     client.release();

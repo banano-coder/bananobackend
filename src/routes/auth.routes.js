@@ -51,6 +51,12 @@ router.post('/login', async (req, res, next) => {
       [user.id_usuario]
     );
     const roles = roleRows.map(r => r.nombre);
+
+    // Bloquear acceso a usuarios con rol solo viewer
+    const soloViewer = roles.length > 0 && roles.every(r => r === 'viewer');
+    if (soloViewer) {
+      return res.status(403).json({ message: 'Rol sin acceso (viewer)' });
+    }
     
     // Generar token
     const token = jwt.sign(

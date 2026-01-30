@@ -61,8 +61,22 @@ router.get('/catalog/brands', async (req, res, next) => {
  */
 router.get('/catalog/products', async (req, res, next) => {
   try {
+    // 1. Verificar si la tienda está abierta
+    const { rows: configRows } = await pool.query(
+      "SELECT clave, valor FROM public.configuracion WHERE clave IN ('tienda', 'catalogo')"
+    );
+    const config = {};
+    configRows.forEach(r => { config[r.clave] = r.valor; });
+
+    const tiendaAbierta = config.tienda?.abierto ?? true;
+    const ocultarSinStock = config.catalogo?.ocultar_sin_stock ?? false;
+
+    if (!tiendaAbierta) {
+      return res.json({ data: [], page: 1, limit: 12, total: 0, pages: 1, message: 'Tienda cerrada' });
+    }
+
     const q = (req.query.q || '').toString().trim();
-    const page  = Math.max(1, parseInt(req.query.page || '1', 10));
+    const page = Math.max(1, parseInt(req.query.page || '1', 10));
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '12', 10)));
     const offset = (page - 1) * limit;
 
@@ -70,16 +84,24 @@ router.get('/catalog/products', async (req, res, next) => {
     const SORT_MAP = {
       name: 'p.nombre',
       created_at: 'p.fecha_creacion',
-      // ordenaremos por el alias min_price (calculado en el SELECT)
       price: 'min_price'
     };
 
     const sortParam = (req.query.sort || 'created_at').toString();
-    const orderBy   = SORT_MAP[sortParam] || SORT_MAP.created_at;
-    const dir       = (req.query.dir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    const orderBy = SORT_MAP[sortParam] || SORT_MAP.created_at;
+    const dir = (req.query.dir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
     // Filtro de búsqueda
     const searchSql = q ? `AND (p.nombre ILIKE $1 OR p.sku_base ILIKE $1)` : '';
+
+    // Filtro de stock (calculado como suma de stock de variantes)
+    const stockFilterSql = ocultarSinStock
+      ? `AND (SELECT SUM(COALESCE(inv.stock, 0)) 
+                FROM public.variante_producto vp2 
+                LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp2.id_variante_producto 
+                WHERE vp2.id_producto = p.id_producto AND vp2.activo = true) > 0`
+      : '';
+
     const paramsBase = q ? [`%${q}%`] : [];
 
     // Total
@@ -89,13 +111,13 @@ router.get('/catalog/products', async (req, res, next) => {
       FROM public.producto p
       WHERE p.activo = true
       ${searchSql}
+      ${stockFilterSql}
       `,
       paramsBase
     );
     const total = tot[0]?.total || 0;
 
     // Datos con precio mínimo de variantes
-
     const paramsData = q ? [`%${q}%`, limit, offset] : [limit, offset];
     const { rows: items } = await pool.query(
       `
@@ -105,16 +127,18 @@ router.get('/catalog/products', async (req, res, next) => {
         p.sku_base,
         p.descripcion,
         p.fecha_creacion,
-       p.id_categoria,
-       p.id_marca,
-        MIN(precio_lista) AS min_price,
-        COUNT(precio_lista) FILTER (WHERE vp.activo = true) AS variantes_activas
+        p.id_categoria,
+        p.id_marca,
+        MIN(vp.precio_lista) AS min_price,
+        COUNT(vp.precio_lista) FILTER (WHERE vp.activo = true) AS variantes_activas,
+        (SELECT url FROM public.imagen_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY es_principal DESC, id_imagen_producto ASC LIMIT 1) AS imagen_principal
       FROM public.producto p
       LEFT JOIN public.variante_producto vp
         ON vp.id_producto = p.id_producto
        AND vp.activo = true
       WHERE p.activo = true
       ${searchSql}
+      ${stockFilterSql}
       GROUP BY p.id_producto
       ORDER BY ${orderBy} ${dir}
       LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
