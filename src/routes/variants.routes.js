@@ -15,11 +15,13 @@ router.get('/products/:id/variants', requireAuth, requireRole('admin', 'manager'
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ message: 'id inválido' });
     const { rows } = await pool.query(`
-      SELECT id_variante_producto, id_producto, sku, precio_lista::float AS precio_lista,
-             costo::float AS costo, codigo_barras, atributos_json, activo
-      FROM public.variante_producto
-      WHERE id_producto = $1
-      ORDER BY id_variante_producto
+      SELECT vp.id_variante_producto, vp.id_producto, vp.sku, vp.precio_lista::float AS precio_lista,
+             vp.costo::float AS costo, vp.codigo_barras, vp.atributos_json, vp.activo,
+             COALESCE(inv.stock, 0)::int AS stock_actual
+      FROM public.variante_producto vp
+      LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp.id_variante_producto
+      WHERE vp.id_producto = $1
+      ORDER BY vp.id_variante_producto
     `, [id]);
     res.json({ data: rows });
   } catch (err) { next(err); }

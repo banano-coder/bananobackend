@@ -21,12 +21,12 @@ router.post('/login', async (req, res, next) => {
     const { rows } = await pool.query(
       `SELECT id_usuario, nombre, email, password, activo
        FROM public.usuario
-       WHERE email = $1
+       WHERE email = $1 AND eliminado = false
        LIMIT 1`,
       [email]
     );
-//console.log(rows.length)
-    if (rows.length <=0) {
+    //console.log(rows.length)
+    if (rows.length <= 0) {
       return res.status(401).json({ message: 'Credenciales inválidas' });
     }
 
@@ -41,7 +41,7 @@ router.post('/login', async (req, res, next) => {
     if (!ok) {
       return res.status(401).json({ message: 'Credenciales inválidas' });
     }
-    
+
     // Roles del usuario
     const { rows: roleRows } = await pool.query(
       `SELECT r.nombre
@@ -57,7 +57,7 @@ router.post('/login', async (req, res, next) => {
     if (soloViewer) {
       return res.status(403).json({ message: 'Rol sin acceso (viewer)' });
     }
-    
+
     // Generar token
     const token = jwt.sign(
       { id: user.id_usuario, email: user.email, roles },

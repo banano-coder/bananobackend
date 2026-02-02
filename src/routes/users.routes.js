@@ -100,7 +100,8 @@ router.get('/users', requireAuth, requireRole('admin'), async (req, res, next) =
     const { rows: totalRows } = await pool.query(`
       SELECT COUNT(*)::int AS total
       FROM public.usuario u
-      WHERE ($1 = '' OR u.nombre ILIKE '%'||$1||'%' OR u.email ILIKE '%'||$1||'%')
+      WHERE u.eliminado = false
+        AND ($1 = '' OR u.nombre ILIKE '%'||$1||'%' OR u.email ILIKE '%'||$1||'%')
     `, [search]);
     const total = totalRows[0].total;
 
@@ -110,7 +111,8 @@ router.get('/users', requireAuth, requireRole('admin'), async (req, res, next) =
       FROM public.usuario u
       LEFT JOIN public.usuario_rol ur ON ur.id_usuario = u.id_usuario
       LEFT JOIN public.rol r ON r.id_rol = ur.id_rol
-      WHERE ($1 = '' OR u.nombre ILIKE '%'||$1||'%' OR u.email ILIKE '%'||$1||'%')
+      WHERE u.eliminado = false
+        AND ($1 = '' OR u.nombre ILIKE '%'||$1||'%' OR u.email ILIKE '%'||$1||'%')
       GROUP BY u.id_usuario
       ORDER BY ${sort} ${dir}
       LIMIT $2 OFFSET $3
@@ -283,6 +285,10 @@ router.delete('/users/:id', requireAuth, requireRole('admin'), async (req, res, 
       }
     }
 
+    // 0. Obtener nombre antes de borrar para auditoría
+    const { rows: targetUser } = await client.query(`SELECT nombre FROM public.usuario WHERE id_usuario = $1`, [targetId]);
+    const targetName = targetUser[0]?.nombre || 'Desconocido';
+
     // 1. Eliminar asociaciones de roles
     await client.query(`DELETE FROM public.usuario_rol WHERE id_usuario = $1`, [targetId]);
 
@@ -293,32 +299,32 @@ router.delete('/users/:id', requireAuth, requireRole('admin'), async (req, res, 
       [targetId]
     );
 
-    // 3. Limpiar referencias en auditoría para evitar errores de FK si existen
-    await client.query(
-      `UPDATE public.auditoria SET actor_id = NULL WHERE actor_id = $1`,
-      [targetId]
-    );
-    await client.query(
-      `UPDATE public.auditoria SET target_usuario_id = NULL WHERE target_usuario_id = $1`,
-      [targetId]
-    );
+    /* 
+       No limpiamos referencias en auditoría ni pedidos. 
+       Al usar SOFT DELETE con columna 'eliminado', el registro de usuario permanece en la BD
+       y los JOINs de auditoría/movimientos seguirán funcionando para mostrar el nombre.
+    */
 
-    // 4. Borrar el usuario físicamente
+    // 4. Borrado lógico (SOFT DELETE con columna eliminado)
+    // No nullificamos referencias para que el nombre del actor se preserve en auditoría y movimientos
     const { rowCount } = await client.query(
-      `DELETE FROM public.usuario WHERE id_usuario = $1`,
+      `UPDATE public.usuario 
+       SET activo = false, 
+           eliminado = true
+       WHERE id_usuario = $1 AND eliminado = false`,
       [targetId]
     );
 
     if (!rowCount) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ message: 'Usuario no encontrado' });
+      return res.status(404).json({ message: 'Usuario no encontrado o ya eliminado' });
     }
 
-    // Auditoría del borrado (el actor_id será el del admin que borra)
+    // Auditoría del borrado lógico
     await client.query(
-      `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload)
-       VALUES ($1, 'usuario', 'HARD_DELETE_USER', $2::jsonb)`,
-      [req.user.id || req.user.sub, JSON.stringify({ deleted_user_id: targetId })]
+      `INSERT INTO public.auditoria (actor_id, target_usuario_id, target_tipo, action, payload)
+       VALUES ($1, $2, 'usuario', 'SOFT_DELETE_USER', $3::jsonb)`,
+      [req.user.id || req.user.sub, targetId, JSON.stringify({ deleted_user_id: targetId, deleted_user_nombre: targetName })]
     );
 
     await client.query('COMMIT');
@@ -332,3 +338,4 @@ router.delete('/users/:id', requireAuth, requireRole('admin'), async (req, res, 
 });
 
 module.exports = router;
+

@@ -200,7 +200,7 @@ router.post('/guest/checkout', async (req, res, next) => {
  * GET /api/pedidos?estado=&from=&to=&search=&page=1&limit=20
  * (search solo por nombre ahora)
  */
-router.get('/pedidos', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.get('/pedidos', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   try {
     const estado = (req.query.estado || '').trim();
     const from = (req.query.from || '').trim();
@@ -250,8 +250,8 @@ router.get('/pedidos', requireAuth, requireRole('admin', 'manager'), async (req,
   }
 });
 
-/** 3) Detalle (admin/manager) */
-router.get('/pedidos/:id', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+/** 3) Detalle (admin/manager o vendedor) */
+router.get('/pedidos/:id', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   try {
     const id = toInt(req.params.id, 0);
     if (!id) return res.status(400).json({ message: 'id inválido' });

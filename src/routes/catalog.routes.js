@@ -29,7 +29,7 @@ router.get('/catalog/categories', async (req, res, next) => {
       `
       SELECT id_categoria AS id, nombre
       FROM public.categoria
-      ${onlyActive ? 'WHERE activo = true' : ''}
+      WHERE eliminado = false ${onlyActive ? 'AND activo = true' : ''}
       ORDER BY nombre ASC
       `
     );
@@ -46,7 +46,7 @@ router.get('/catalog/brands', async (req, res, next) => {
       `
       SELECT id_marca AS id, nombre
       FROM public.marca
-      ${onlyActive ? 'WHERE activo = true' : ''}
+      WHERE eliminado = false ${onlyActive ? 'AND activo = true' : ''}
       ORDER BY nombre ASC
       `
     );
@@ -109,7 +109,7 @@ router.get('/catalog/products', async (req, res, next) => {
       `
       SELECT COUNT(*)::int AS total
       FROM public.producto p
-      WHERE p.activo = true
+      WHERE p.activo = true AND p.eliminado = false
       ${searchSql}
       ${stockFilterSql}
       `,
@@ -136,7 +136,7 @@ router.get('/catalog/products', async (req, res, next) => {
       LEFT JOIN public.variante_producto vp
         ON vp.id_producto = p.id_producto
        AND vp.activo = true
-      WHERE p.activo = true
+      WHERE p.activo = true AND p.eliminado = false
       ${searchSql}
       ${stockFilterSql}
       GROUP BY p.id_producto
@@ -177,7 +177,7 @@ router.get('/catalog/products/:id', async (req, res, next) => {
       FROM public.producto p
       LEFT JOIN public.categoria c ON c.id_categoria = p.id_categoria
       LEFT JOIN public.marca     m ON m.id_marca     = p.id_marca  -- ⚠️ si tu columna fuera id_mrca, cambia aquí
-      WHERE p.id_producto = $1 AND p.activo = true
+      WHERE p.id_producto = $1 AND p.activo = true AND p.eliminado = false
       LIMIT 1
       `,
       [id]
