@@ -17,6 +17,7 @@ const ACTION_LABELS = {
   ENABLE: 'Activó usuario',
   DISABLE: 'Desactivó usuario',
   PRODUCT_CREATE: 'Creó producto',
+  PRODUCT_CREATE_WITH_VARIANT: 'Creó producto (con variante)',
   PRODUCT_UPDATE: 'Actualizó producto',
   PRODUCT_DISABLE: 'Desactivó producto',
   CAT_CREATE: 'Creó categoría',
@@ -96,6 +97,14 @@ function formatDetail(action, payload) {
       return data.nombre ? `Marca: ${data.nombre} (ID: ${data.id_marca})` : `Marca ID: ${data.id_marca}`;
     case 'CAT_SOFT_DELETE':
       return data.nombre ? `Categoría: ${data.nombre} (ID: ${data.id_categoria})` : `Categoría ID: ${data.id_categoria}`;
+    case 'PRODUCT_CREATE_WITH_VARIANT':
+      return data.id_producto ? `ID Producto: ${data.id_producto} | ID Variante: ${data.variant_id}` : '';
+    case 'PRODUCT_CREATE':
+      return data.id_producto ? `ID Producto: ${data.id_producto}` : '';
+    case 'CAT_CREATE':
+      return data.id_categoria ? `ID Categoría: ${data.id_categoria} | Nombre: ${data.nombre}` : '';
+    case 'BRAND_CREATE':
+      return data.id_marca ? `ID Marca: ${data.id_marca} | Nombre: ${data.nombre}` : '';
     default:
       return typeof data === 'object' ? JSON.stringify(data) : String(data);
   }
