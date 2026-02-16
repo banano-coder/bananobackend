@@ -36,6 +36,13 @@ router.post('/products/:id/variants', requireAuth, requireRole('admin', 'manager
 
     let { sku, precio_lista, costo, codigo_barras, atributos_json, activo = true } = req.body || {};
 
+    if (precio_lista != null && parseFloat(precio_lista) < 0) {
+      return res.status(400).json({ message: 'El precio_lista no puede ser negativo' });
+    }
+    if (costo != null && parseFloat(costo) < 0) {
+      return res.status(400).json({ message: 'El costo no puede ser negativo' });
+    }
+
     await client.query('BEGIN');
 
     const { rows: p } = await client.query(`SELECT 1 FROM public.producto WHERE id_producto=$1 AND activo=true`, [idProd]);
@@ -83,6 +90,13 @@ router.patch('/variants/:id', requireAuth, requireRole('admin', 'manager'), asyn
     if (!id) return res.status(400).json({ message: 'id inválido' });
 
     const { sku, precio_lista, costo, codigo_barras, atributos_json, activo } = req.body || {};
+
+    if (precio_lista != null && parseFloat(precio_lista) < 0) {
+      return res.status(400).json({ message: 'El precio_lista no puede ser negativo' });
+    }
+    if (costo != null && parseFloat(costo) < 0) {
+      return res.status(400).json({ message: 'El costo no puede ser negativo' });
+    }
 
     await client.query('BEGIN');
 

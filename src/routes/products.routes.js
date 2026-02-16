@@ -46,6 +46,10 @@ router.post('/products', requireAuth, requireRole('admin', 'manager'), async (re
   try {
     const { id_categoria, id_marca, nombre, descripcion, activo, create_default_variant = true, initial_price = 0 } = req.body || {};
 
+    if (initial_price != null && parseFloat(initial_price) < 0) {
+      return res.status(400).json({ message: 'El precio inicial no puede ser negativo' });
+    }
+
     if (!id_categoria || !id_marca || !nombre) {
       return res.status(400).json({ message: 'id_categoria, id_marca y nombre son requeridos' });
     }

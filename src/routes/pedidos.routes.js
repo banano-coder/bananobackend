@@ -11,6 +11,76 @@ const BANANO_WA = process.env.BANANO_WA || '584129326373';
 // Helpers
 function toInt(v, def) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : def; }
 function toFloat(v, def) { const n = parseFloat(v); return Number.isFinite(n) ? n : def; }
+function normEmail(v) {
+  const s = String(v || '').trim().toLowerCase();
+  return s || null;
+}
+function normPhone(v) {
+  const raw = String(v || '').trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, '');
+  return digits || null;
+}
+function normCedula(v) {
+  const raw = String(v || '').trim();
+  if (!raw) return null;
+  const clean = raw.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+  return clean || null;
+}
+
+/**
+ * 0) Buscar datos de cliente por cédula (para auto-relleno en frontend)
+ * GET /api/guest/client/:cedula
+ */
+router.get('/guest/client/:cedula', async (req, res, next) => {
+  try {
+    const cedula = normCedula(req.params.cedula);
+    if (!cedula) return res.status(400).json({ status: 'error', message: 'cedula es requerida' });
+
+    const { rows } = await pool.query(
+      `SELECT nombre, email, telefono FROM public.cliente WHERE cedula = $1`,
+      [cedula]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ status: 'error', message: 'Cliente no encontrado' });
+    }
+
+    res.json({ status: 'success', data: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+async function upsertClienteByCedula(db, { cedula, nombre, email, telefono }) {
+  const cedulaNorm = normCedula(cedula);
+  const nombreLimpio = String(nombre || '').trim();
+  const emailNorm = normEmail(email);
+  const telefonoNorm = normPhone(telefono);
+
+  try {
+    await db.query(
+      `INSERT INTO public.cliente (cedula, nombre, telefono, email)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (cedula)
+       DO UPDATE SET
+         nombre = EXCLUDED.nombre,
+         telefono = EXCLUDED.telefono,
+         email = EXCLUDED.email,
+         updated_at = NOW()`,
+      [cedulaNorm, nombreLimpio, telefonoNorm, emailNorm]
+    );
+  } catch (e) {
+    if (e?.code === '23505') {
+      const err = new Error('El teléfono o email ya están registrados en otro cliente');
+      err.status = 409;
+      throw err;
+    }
+    throw e;
+  }
+
+  return cedulaNorm;
+}
 
 // Arma texto de WhatsApp
 function buildWaText({ id_pedido, cliente_nombre, cliente_email, cliente_telefono, items, total, nota, welcomeMessage }) {
@@ -59,7 +129,10 @@ function buildWaLink(phone, text) {
 router.post('/guest/checkout', async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const { items, cliente_nombre, cliente_email, cliente_telefono, nota } = req.body || {};
+    const { items, cliente_cedula, cedula, cliente_nombre, cliente_email, cliente_telefono, nota } = req.body || {};
+    const clienteCedulaNorm = normCedula(cliente_cedula ?? cedula);
+    const clienteEmailNorm = normEmail(cliente_email);
+    const clienteTelefonoNorm = normPhone(cliente_telefono);
 
     // Validaciones básicas
     if (!Array.isArray(items) || items.length === 0) {
@@ -67,6 +140,15 @@ router.post('/guest/checkout', async (req, res, next) => {
     }
     if (!cliente_nombre) {
       return res.status(400).json({ status: 'error', message: 'cliente_nombre es requerido' });
+    }
+    if (!clienteCedulaNorm) {
+      return res.status(400).json({ status: 'error', message: 'cliente_cedula es requerido' });
+    }
+    if (!clienteEmailNorm) {
+      return res.status(400).json({ status: 'error', message: 'cliente_email es requerido' });
+    }
+    if (!clienteTelefonoNorm) {
+      return res.status(400).json({ status: 'error', message: 'cliente_telefono es requerido' });
     }
 
     // Normalizar items (admite id_variante_producto | id_variante | id)
@@ -118,11 +200,18 @@ router.post('/guest/checkout', async (req, res, next) => {
 
     await client.query('BEGIN');
 
+    const cedulaCliente = await upsertClienteByCedula(client, {
+      cedula: clienteCedulaNorm,
+      nombre: cliente_nombre,
+      email: clienteEmailNorm,
+      telefono: cliente_telefono
+    });
+
     // Crear pedido con email y teléfono
     const { rows: ped } = await client.query(
-      `INSERT INTO public.pedido (cliente_nombre, cliente_email, cliente_telefono, observacion, estado)
-       VALUES ($1, $2, $3, $4, 'nuevo') RETURNING id_pedido`,
-      [cliente_nombre, cliente_email || null, cliente_telefono || null, nota || null]
+      `INSERT INTO public.pedido (cedula_cliente, cliente_nombre, cliente_email, cliente_telefono, observacion, estado)
+       VALUES ($1, $2, $3, $4, $5, 'nuevo') RETURNING id_pedido`,
+      [cedulaCliente, cliente_nombre, clienteEmailNorm, clienteTelefonoNorm, nota || null]
     );
     const id_pedido = ped[0].id_pedido;
 
@@ -155,7 +244,7 @@ router.post('/guest/checkout', async (req, res, next) => {
     await client.query(
       `INSERT INTO public.auditoria (actor_id, target_pedido_id, target_tipo, action, payload, created_at)
        VALUES ($1, $2, 'pedido', 'PEDIDO_CREAR', $3::jsonb, NOW())`,
-      [null, id_pedido, JSON.stringify({ cliente_nombre, cliente_email, cliente_telefono, total, items: normItems })]
+      [null, id_pedido, JSON.stringify({ cedula_cliente: cedulaCliente, cliente_nombre, cliente_email: clienteEmailNorm, cliente_telefono: clienteTelefonoNorm, total, items: normItems })]
     );
 
     // Obtener configuración de WhatsApp dinámica
@@ -168,8 +257,8 @@ router.post('/guest/checkout', async (req, res, next) => {
     const texto = buildWaText({
       id_pedido,
       cliente_nombre,
-      cliente_email,
-      cliente_telefono,
+      cliente_email: clienteEmailNorm,
+      cliente_telefono: clienteTelefonoNorm,
       items: snapshotItems,
       total,
       nota,
@@ -234,7 +323,7 @@ router.get('/pedidos', requireAuth, requireRole('admin', 'manager', 'vendedor'),
 
     const { rows: data } = await pool.query(
       `
-      SELECT p.id_pedido, p.origen, p.cliente_nombre, p.cliente_email, p.cliente_telefono,
+      SELECT p.id_pedido, p.cedula_cliente, p.origen, p.cliente_nombre, p.cliente_email, p.cliente_telefono,
              p.total_estimado::float AS total_estimado, p.estado, p.created_at, p.updated_at
       FROM public.pedido p
       ${where}
@@ -258,7 +347,7 @@ router.get('/pedidos/:id', requireAuth, requireRole('admin', 'manager', 'vendedo
 
     const { rows: head } = await pool.query(
       `
-      SELECT id_pedido, origen, cliente_nombre, cliente_email, cliente_telefono,
+      SELECT id_pedido, cedula_cliente, origen, cliente_nombre, cliente_email, cliente_telefono,
              total_estimado::float AS total_estimado, estado, whatsapp_text, whatsapp_link,
              observacion, empleado_asignado, created_at, updated_at
       FROM public.pedido WHERE id_pedido = $1
