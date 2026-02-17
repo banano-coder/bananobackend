@@ -308,7 +308,7 @@ router.get('/reports/inventario/salidas-serie',
  * - Filtra variantes y productos activos con stock <= threshold.
  */
 router.get('/reports/alertas/stock-bajo',
-  requireAuth, requireRole('admin', 'manager'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor'),
   async (req, res, next) => {
     try {
       const threshold = toInt(req.query.threshold, 5);
@@ -481,7 +481,7 @@ p.id_producto,
  * GET /api/auditoria?target_tipo=&target_pedido_id=&target_usuario_id=&action=&actor_id=&from=&to=&page=&limit=
  * Roles:
  *   - admin/manager: ven todo
- *   - vendedor: solo eventos de pedidos
+ *   - vendedor: solo eventos de inventario (INV_*)
  */
 router.get('/auditoria',
   requireAuth,
@@ -519,7 +519,8 @@ router.get('/auditoria',
 
       // Restricción: vendedores solo ven auditoría de pedidos e inventario
       if (isVendor && !isAdminMgr) {
-        conds.push(`a.target_tipo = ANY(ARRAY['pedido', 'inventario'])`);
+        conds.push(`a.target_tipo = 'inventario'`);
+        conds.push(`a.action LIKE 'INV_%'`);
       }
 
       const where = conds.length ? `WHERE ${conds.join(' AND ')} ` : '';
@@ -617,3 +618,4 @@ a.id,
 );
 
 module.exports = router;
+

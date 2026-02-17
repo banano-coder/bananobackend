@@ -292,12 +292,6 @@ router.delete('/users/:id', requireAuth, requireRole('admin'), async (req, res, 
     // 1. Eliminar asociaciones de roles
     await client.query(`DELETE FROM public.usuario_rol WHERE id_usuario = $1`, [targetId]);
 
-    // 2. Limpiar referencias en pedidos (vendedor asignado)
-    // Usamos UPDATE para no borrar el pedido, solo quitar la referencia al usuario
-    await client.query(
-      `UPDATE public.pedido SET empleado_asignado = NULL WHERE empleado_asignado = $1`,
-      [targetId]
-    );
 
     /* 
        No limpiamos referencias en auditoría ni pedidos. 

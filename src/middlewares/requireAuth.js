@@ -16,14 +16,16 @@ function requireAuth(req, res, next) {
 }
 
 function requireRole(...allowed) {
-    return (req, res, next) => {
-      const roles = req.user?.roles || [];
-      if (!roles.length) return res.status(401).json({ message: 'No autenticado' });
-      if (!roles.some(r => allowed.includes(r))) {
-        return res.status(403).json({ message: 'No autorizado' });
-      }
-      next();
-    };
-  }
+  return (req, res, next) => {
+    const roles = req.user?.roles || [];
+    if (!roles.length) return res.status(401).json({ message: 'No autenticado' });
+    if (!roles.some(r => allowed.includes(r))) {
+      return res.status(403).json({
+        message: `Acceso denegado. Esta acción solo está permitida para usuarios con rol: ${allowed.join(', ')}`
+      });
+    }
+    next();
+  };
+}
 
 module.exports = { requireAuth, requireRole };

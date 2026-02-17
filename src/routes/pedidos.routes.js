@@ -349,7 +349,7 @@ router.get('/pedidos/:id', requireAuth, requireRole('admin', 'manager', 'vendedo
       `
       SELECT id_pedido, cedula_cliente, origen, cliente_nombre, cliente_email, cliente_telefono,
              total_estimado::float AS total_estimado, estado, whatsapp_text, whatsapp_link,
-             observacion, empleado_asignado, created_at, updated_at
+             observacion, created_at, updated_at
       FROM public.pedido WHERE id_pedido = $1
       `,
       [id]

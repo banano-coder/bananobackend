@@ -34,7 +34,7 @@ router.post('/brands', requireAuth, requireRole('admin', 'manager'), async (req,
 
     await client.query('COMMIT');
     res.status(201).json({ message: 'Marca creada', brand: rows[0] });
-  } catch (err) { try { await pool.query('ROLLBACK') } catch { }; next(err); }
+  } catch (err) { try { await client.query('ROLLBACK') } catch { }; next(err); }
   finally { client.release(); }
 });
 
@@ -64,7 +64,7 @@ router.patch('/brands/:id', requireAuth, requireRole('admin', 'manager'), async 
 
     await client.query('COMMIT');
     res.json({ message: 'Actualizada', brand: rows[0] });
-  } catch (err) { try { await pool.query('ROLLBACK') } catch { }; next(err); }
+  } catch (err) { try { await client.query('ROLLBACK') } catch { }; next(err); }
   finally { client.release(); }
 });
 
@@ -90,7 +90,7 @@ router.delete('/brands/:id', requireAuth, requireRole('admin', 'manager'), async
 
     await client.query('COMMIT');
     res.json({ message: 'Marca desactivada' });
-  } catch (err) { try { await pool.query('ROLLBACK') } catch { }; next(err); }
+  } catch (err) { try { await client.query('ROLLBACK') } catch { }; next(err); }
   finally { client.release(); }
 });
 
