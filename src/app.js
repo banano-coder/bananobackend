@@ -19,6 +19,7 @@ const categoriesRoutes = require('./routes/categories.routes');
 const brandsRoutes = require('./routes/brands.routes');
 const reportsRoutes = require('./routes/reports.routes');
 const configRoutes = require('./routes/config.routes');
+const bulkRoutes = require('./routes/bulk.routes');
 const { notFound, errorHandler } = require('./middlewares/error.middleware');
 
 const app = express();
@@ -46,6 +47,7 @@ app.use('/api', brandsRoutes);
 app.use('/api', categoriesRoutes);
 app.use('/api/', reportsRoutes);
 app.use('/api/', configRoutes);
+app.use('/api', bulkRoutes);
 
 // 404 & errores
 app.use(notFound);
