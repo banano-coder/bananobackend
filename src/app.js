@@ -31,6 +31,9 @@ app.use(express.json());
 app.use(morgan('dev'));
 
 // Rutas
+app.get('/', (req, res) => {
+  res.json({ message: 'Banano API está activa 🚀', version: '1.0.0' });
+});
 app.use('/api', healthRoutes);
 app.use('/api', productsRoutes);
 app.use('/api/auth', authRoutes);
