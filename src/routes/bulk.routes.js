@@ -8,13 +8,12 @@ const { requireAuth, requireRole } = require('../middlewares/requireAuth');
 
 const router = Router();
 
-// Configuración de multer para subidas temporales
+const os = require('os');
+
+// Configuración de multer para subidas temporales (Cambiado a /tmp para Vercel)
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const tempDir = path.join(__dirname, '../../uploads/temp');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
+    const tempDir = os.tmpdir();
     cb(null, tempDir);
   },
   filename: (req, file, cb) => {
