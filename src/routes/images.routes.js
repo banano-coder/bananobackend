@@ -7,31 +7,16 @@ const { requireAuth, requireRole } = require('../middlewares/requireAuth');
 
 const router = Router();
 
-// --- Multer: almacenamiento en disco ---------------------------------
-const UP_BASE = path.join(__dirname, '..', '..', 'uploads', 'products');
-fs.mkdirSync(UP_BASE, { recursive: true });
+const { storage, cloudinary } = require('../config/cloudinary');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UP_BASE),
-  filename: (req, file, cb) => {
-    const ext = (path.extname(file.originalname) || '.jpg').toLowerCase();
-    const name = `p${req.params.id}_${Date.now()}_${Math.random().toString(36).slice(2)}${ext}`;
-    cb(null, name);
-  }
-});
-
-// 5 MB, solo imágenes
+// --- Multer: almacenamiento en Cloudinary -----------------------------
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const ok = /image\/(jpeg|png|webp|gif)/.test(file.mimetype);
-    cb(ok ? null : new Error('Solo se permiten imágenes'), ok);
-  }
+  limits: { fileSize: 5 * 1024 * 1024 }
 });
 
-// Helper: arma URL pública
-const publicUrl = (filename) => `/uploads/products/${filename}`;
+// Helper: ya no hace falta armar la URL porque cloudinary la devuelve completa en req.file.path
+const publicUrl = (file) => file.path;
 
 // --- Endpoints --------------------------------------------------------
 
@@ -54,7 +39,7 @@ router.post('/products/:id/images',
       let idVariante = req.body.id_variante_producto ? parseInt(req.body.id_variante_producto, 10) : null;
       if (idVariante && isNaN(idVariante)) idVariante = null;
 
-      const url = publicUrl(req.file.filename);
+      const url = publicUrl(req.file);
 
       await client.query('BEGIN');
 
@@ -172,15 +157,18 @@ router.delete('/products/:id/images/:imgId',
 
       await client.query('COMMIT');
 
-      // (opcional) borrar archivo físico:
+      // Borrar de Cloudinary:
       try {
-        const fname = rows[0].url.replace('/uploads/products/', '');
-        const filePath = path.join(UP_BASE, fname);
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-        }
+        const url = rows[0].url;
+        // Extraer public_id: "banano_products/p72_..."
+        const parts = url.split('/');
+        const filenameWithExtension = parts.pop(); // "p72_...jpg"
+        const folder = parts.pop(); // "banano_products"
+        const publicId = `${folder}/${filenameWithExtension.split('.')[0]}`;
+        
+        await cloudinary.uploader.destroy(publicId);
       } catch (e) {
-        console.error("Error deleting file", e);
+        console.error("Error deleting from Cloudinary", e);
       }
 
       res.json({ message: 'Imagen eliminada permanentemente' });
