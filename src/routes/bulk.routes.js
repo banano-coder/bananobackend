@@ -70,7 +70,7 @@ router.post('/bulk/parse-file', requireAuth, requireRole('admin', 'manager'), up
     const colDesc = headerRow.findIndex(h => h && h.includes('descrip'));
     const colCosto = headerRow.findIndex(h => h && h.includes('costo'));
     const colPrecio = headerRow.findIndex(h => h && h.includes('precio'));
-    const colStock = headerRow.findIndex(h => h && h.includes('existencia') || h.includes('stock'));
+    const colStock = headerRow.findIndex(h => h && (h.includes('existencia') || h.includes('stock')));
     const colCat = headerRow.findIndex(h => h && (h.includes('categoria') || h.includes('departamento') || h.includes('categoría')));
     const colMarca = headerRow.findIndex(h => h && h.includes('marca'));
     const colCodigo = headerRow.findIndex(h => h && (h.includes('codigo') || h.includes('código')));
