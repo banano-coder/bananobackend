@@ -63,17 +63,17 @@ router.post('/bulk/parse-file', requireAuth, requireRole('admin', 'manager'), up
     }
 
     // Identificar posiciones de columnas basándonos en el encabezado
-    const headerRow = rawData[headerRowIndex].map(h => typeof h === 'string' ? h.toLowerCase().trim() : '');
+    const headerRow = (rawData[headerRowIndex] || []).map(h => (h !== null && h !== undefined) ? String(h).toLowerCase().trim() : '');
     
-    // Buscar índices flexibles
-    const colNombre = headerRow.findIndex(h => h.includes('nombre') && !h.includes('categor'));
-    const colDesc = headerRow.findIndex(h => h.includes('descrip'));
-    const colCosto = headerRow.findIndex(h => h.includes('costo'));
-    const colPrecio = headerRow.findIndex(h => h.includes('precio'));
-    const colStock = headerRow.findIndex(h => h.includes('existencia') || h.includes('stock'));
-    const colCat = headerRow.findIndex(h => h.includes('categoria') || h.includes('departamento') || h.includes('categoría'));
-    const colMarca = headerRow.findIndex(h => h.includes('marca'));
-    const colCodigo = headerRow.findIndex(h => h.includes('codigo') || h.includes('código'));
+    // Buscar índices flexibles (Añadimos comprobación de existencia)
+    const colNombre = headerRow.findIndex(h => h && h.includes('nombre') && !h.includes('categor'));
+    const colDesc = headerRow.findIndex(h => h && h.includes('descrip'));
+    const colCosto = headerRow.findIndex(h => h && h.includes('costo'));
+    const colPrecio = headerRow.findIndex(h => h && h.includes('precio'));
+    const colStock = headerRow.findIndex(h => h && h.includes('existencia') || h.includes('stock'));
+    const colCat = headerRow.findIndex(h => h && (h.includes('categoria') || h.includes('departamento') || h.includes('categoría')));
+    const colMarca = headerRow.findIndex(h => h && h.includes('marca'));
+    const colCodigo = headerRow.findIndex(h => h && (h.includes('codigo') || h.includes('código')));
 
     // Si no se encuentran columnas requeridas, usar fallback genérico (según el formato inicial del usuario)
     const idxNombre = colNombre >= 0 ? colNombre : 4;
