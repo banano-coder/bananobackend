@@ -5,10 +5,10 @@ const { requireAuth, requireRole } = require('../middlewares/requireAuth');
 const router = Router();
 
 // LISTAR (últimos 50) con categoría/marca y stock agregado
-router.get('/products', async (_req, res, next) => {
+router.get('/products', async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
-      `
+    const { search } = req.query;
+    let query = `
       SELECT
         p.id_producto,
         p.id_categoria,
@@ -27,10 +27,21 @@ router.get('/products', async (_req, res, next) => {
       LEFT JOIN public.variante_producto vp ON vp.id_producto = p.id_producto
       LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp.id_variante_producto
       WHERE p.eliminado = false
+    `;
+
+    const values = [];
+    if (search) {
+      query += ` AND (p.nombre ILIKE $1 OR c.nombre ILIKE $1 OR m.nombre ILIKE $1) `;
+      values.push(`%${search}%`);
+    }
+
+    query += `
       GROUP BY p.id_producto, c.nombre, m.nombre
       ORDER BY p.fecha_creacion DESC
-      `
-    );
+      LIMIT 100
+    `;
+
+    const { rows } = await pool.query(query, values);
     res.json(rows);
   } catch (err) {
     next(err);
