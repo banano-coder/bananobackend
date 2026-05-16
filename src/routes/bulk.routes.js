@@ -170,6 +170,58 @@ router.post('/bulk/create', requireAuth, requireRole('admin', 'manager'), async 
   try {
     await client.query('BEGIN');
 
+    // Caché local para evitar consultas repetidas en el mismo lote
+    const categoryCache = {};
+    const brandCache = {};
+
+    const getOrCreateCategory = async (name) => {
+      if (!name) return null;
+      const cleanName = name.trim();
+      const lowerName = cleanName.toLowerCase();
+      if (categoryCache[lowerName]) return categoryCache[lowerName];
+
+      const { rows } = await client.query(
+        "SELECT id_categoria FROM public.categoria WHERE LOWER(nombre) = $1 AND eliminado = false LIMIT 1",
+        [lowerName]
+      );
+
+      if (rows.length > 0) {
+        categoryCache[lowerName] = rows[0].id_categoria;
+        return rows[0].id_categoria;
+      }
+
+      const { rows: newRows } = await client.query(
+        "INSERT INTO public.categoria (nombre, activo) VALUES ($1, true) RETURNING id_categoria",
+        [cleanName]
+      );
+      categoryCache[lowerName] = newRows[0].id_categoria;
+      return newRows[0].id_categoria;
+    };
+
+    const getOrCreateBrand = async (name) => {
+      if (!name) return null;
+      const cleanName = name.trim();
+      const lowerName = cleanName.toLowerCase();
+      if (brandCache[lowerName]) return brandCache[lowerName];
+
+      const { rows } = await client.query(
+        "SELECT id_marca FROM public.marca WHERE LOWER(nombre) = $1 AND eliminado = false LIMIT 1",
+        [lowerName]
+      );
+
+      if (rows.length > 0) {
+        brandCache[lowerName] = rows[0].id_marca;
+        return rows[0].id_marca;
+      }
+
+      const { rows: newRows } = await client.query(
+        "INSERT INTO public.marca (nombre, activo) VALUES ($1, true) RETURNING id_marca",
+        [cleanName]
+      );
+      brandCache[lowerName] = newRows[0].id_marca;
+      return newRows[0].id_marca;
+    };
+
     const createdProductIds = [];
     let variantsCount = 0;
 
@@ -179,16 +231,22 @@ router.post('/bulk/create', requireAuth, requireRole('admin', 'manager'), async 
         descripcion, 
         id_categoria, 
         id_marca, 
+        categoria_sugerida,
+        marca_sugerida,
         activo = true,
         variants = []
       } = p;
 
-      // Inserción del producto padre
+      // RESOLUCIÓN AUTOMÁTICA DE TAXONOMÍAS
+      const finalIdCat = id_categoria || await getOrCreateCategory(categoria_sugerida);
+      const finalIdMarca = id_marca || await getOrCreateBrand(marca_sugerida);
+
+      // Inserción del producto padre (Nace como pendiente de revisión)
       const { rows: prodRows } = await client.query(
-        `INSERT INTO public.producto (id_categoria, id_marca, nombre, descripcion, activo, fecha_creacion)
-         VALUES ($1, $2, $3, $4, $5, NOW())
+        `INSERT INTO public.producto (id_categoria, id_marca, nombre, descripcion, activo, necesita_revision, fecha_creacion)
+         VALUES ($1, $2, $3, $4, $5, true, NOW())
          RETURNING id_producto`,
-        [id_categoria || null, id_marca || null, nombre, descripcion || null, activo]
+        [finalIdCat, finalIdMarca, nombre, descripcion || null, activo]
       );
       const productId = prodRows[0].id_producto;
       createdProductIds.push({ id: productId, nombre });

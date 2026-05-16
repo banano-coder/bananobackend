@@ -18,6 +18,7 @@ router.get('/products', async (req, res, next) => {
         p.nombre,
         p.descripcion,
         p.activo,
+        p.necesita_revision,
         p.fecha_creacion,
         COUNT(vp.id_variante_producto)::int AS variants_count,
         COALESCE(SUM(inv.stock)::int, 0) AS total_stock
@@ -36,12 +37,37 @@ router.get('/products', async (req, res, next) => {
     }
 
     query += `
-      GROUP BY p.id_producto, c.nombre, m.nombre
+      GROUP BY p.id_producto, c.nombre, m.nombre, p.necesita_revision
       ORDER BY p.fecha_creacion DESC
       LIMIT 100
     `;
 
     const { rows } = await pool.query(query, values);
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// LISTAR PENDIENTES DE REVISIÓN
+router.get('/products/pending', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT
+        p.id_producto AS id,
+        p.nombre,
+        p.descripcion,
+        p.necesita_revision,
+        c.nombre AS categoria_sugerida,
+        m.nombre AS marca_sugerida
+      FROM public.producto p
+      LEFT JOIN public.categoria c ON c.id_categoria = p.id_categoria
+      LEFT JOIN public.marca m     ON m.id_marca     = p.id_marca
+      WHERE p.eliminado = false AND p.necesita_revision = true
+      ORDER BY p.fecha_creacion ASC
+      `
+    );
     res.json(rows);
   } catch (err) {
     next(err);
@@ -162,9 +188,10 @@ router.put('/products/:id', requireAuth, requireRole('admin', 'manager'), async 
            id_marca     = COALESCE($3, id_marca),
            nombre       = COALESCE($4, nombre),
            descripcion  = COALESCE($5, descripcion),
-           activo       = COALESCE($6, activo)
+           activo       = COALESCE($6, activo),
+           necesita_revision = false 
        WHERE id_producto = $1
-       RETURNING id_producto, id_categoria, id_marca, nombre, descripcion, activo, fecha_creacion`,
+       RETURNING id_producto, id_categoria, id_marca, nombre, descripcion, activo, necesita_revision, fecha_creacion`,
       [id, id_categoria, id_marca, nombre, descripcion, activo]
     );
     const updatedProduct = rows[0];
