@@ -20,6 +20,7 @@ router.get('/products', async (req, res, next) => {
         p.activo,
         p.necesita_revision,
         p.fecha_creacion,
+        (SELECT url FROM public.imagen_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY es_principal DESC, id_imagen_producto ASC LIMIT 1) AS image,
         COUNT(vp.id_variante_producto)::int AS variants_count,
         COALESCE(SUM(inv.stock)::int, 0) AS total_stock
       FROM public.producto p
