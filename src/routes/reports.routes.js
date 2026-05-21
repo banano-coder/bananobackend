@@ -40,7 +40,10 @@ const ACTION_LABELS = {
   SOFT_DELETE_USER: 'Eliminó usuario',
   PRODUCT_SOFT_DELETE: 'Eliminó producto',
   BRAND_SOFT_DELETE: 'Eliminó marca',
-  CAT_SOFT_DELETE: 'Eliminó categoría'
+  CAT_SOFT_DELETE: 'Eliminó categoría',
+  ALMACEN_CREATE: 'Creó almacén',
+  ALMACEN_UPDATE: 'Actualizó almacén',
+  ALMACEN_SOFT_DELETE: 'Eliminó almacén'
 };
 
 // Resumen legible del payload según acción
@@ -103,6 +106,12 @@ function formatDetail(action, payload) {
       return data.id_producto ? `ID Producto: ${data.id_producto}` : '';
     case 'CAT_CREATE':
       return data.id_categoria ? `ID Categoría: ${data.id_categoria} | Nombre: ${data.nombre}` : '';
+    case 'ALMACEN_SOFT_DELETE':
+      return data.nombre ? `Almacén: ${data.nombre} (ID: ${data.id_almacen})` : `Almacén ID: ${data.id_almacen}`;
+    case 'ALMACEN_CREATE':
+      return data.id_almacen ? `ID Almacén: ${data.id_almacen} | Nombre: ${data.nombre}` : '';
+    case 'ALMACEN_UPDATE':
+      return data.id_almacen ? `ID Almacén: ${data.id_almacen} | Cambios: ${JSON.stringify(data.changes)}` : '';
     case 'BRAND_CREATE':
       return data.id_marca ? `ID Marca: ${data.id_marca} | Nombre: ${data.nombre}` : '';
     default:
@@ -596,6 +605,10 @@ a.id,
             return `Usuario: ${name} `;
           }
 
+          if (r.target_tipo === 'almacen') {
+            const name = r.payload?.nombre || r.payload?.id_almacen || '';
+            return `Almacén: ${name}`;
+          }
           if (r.target_tipo === 'producto' || (r.action === 'PRODUCT_SOFT_DELETE')) {
             const name = r.target_producto_nombre || r.payload?.deleted_product_nombre || r.payload?.id_producto || '';
             return `Producto: ${name} `;

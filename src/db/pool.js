@@ -11,6 +11,8 @@ const pool = new Pool({
   min: env.PGPOOL_MIN,
   max: env.PGPOOL_MAX,
   idleTimeoutMillis: env.PGPOOL_IDLE_MS,
+  connectionTimeoutMillis: 5000,   // Si no conecta en 5s, reintenta
+  allowExitOnIdle: true,           // Permite cerrar conexiones idle limpiamente
   ssl
 });
 
