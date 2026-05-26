@@ -131,6 +131,7 @@ router.get('/catalog/products', async (req, res, next) => {
         p.id_marca,
         MIN(vp.precio_lista) AS min_price,
         COUNT(vp.precio_lista) FILTER (WHERE vp.activo = true) AS variantes_activas,
+        (SELECT id_variante_producto FROM public.variante_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY id_variante_producto ASC LIMIT 1) AS default_variant_id,
         (SELECT url FROM public.imagen_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY es_principal DESC, id_imagen_producto ASC LIMIT 1) AS imagen_principal
       FROM public.producto p
       LEFT JOIN public.variante_producto vp

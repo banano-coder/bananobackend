@@ -321,28 +321,58 @@ router.get('/reports/alertas/stock-bajo',
   async (req, res, next) => {
     try {
       const threshold = toInt(req.query.threshold, 5);
+      const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
 
-      const { rows } = await pool.query(
-        `
-        SELECT
-          p.id_producto,
-          p.nombre AS producto,
-          v.id_variante_producto,
-          v.sku,
-          COALESCE(i.stock,0)::int AS stock,
-          COALESCE(v.activo, true) AS variante_activa,
-          p.activo AS producto_activo
-        FROM public.producto p
-        LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto
-        LEFT JOIN public.inventario i        ON i.id_variante_producto = v.id_variante_producto
-        WHERE p.activo = true
-          AND (v.id_variante_producto IS NULL OR v.activo = true)
-          AND COALESCE(i.stock,0) <= $1
-        ORDER BY i.stock ASC, p.nombre, v.sku
-        `,
-        [threshold]
-      );
+      let query = '';
+      let params = [];
 
+      if (idAlmacen) {
+        query = `
+          SELECT
+            p.id_producto,
+            p.nombre AS producto,
+            v.id_variante_producto,
+            v.sku,
+            COALESCE(i.stock,0)::int AS stock,
+            i.id_almacen,
+            alm.nombre AS almacen_nombre,
+            COALESCE(v.activo, true) AS variante_activa,
+            p.activo AS producto_activo
+          FROM public.producto p
+          LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto
+          LEFT JOIN public.inventario i        ON i.id_variante_producto = v.id_variante_producto AND i.id_almacen = $2
+          LEFT JOIN public.almacen alm         ON alm.id_almacen = i.id_almacen
+          WHERE p.activo = true
+            AND (v.id_variante_producto IS NULL OR v.activo = true)
+            AND COALESCE(i.stock,0) <= $1
+          ORDER BY i.stock ASC, p.nombre, v.sku
+        `;
+        params = [threshold, idAlmacen];
+      } else {
+        query = `
+          SELECT
+            p.id_producto,
+            p.nombre AS producto,
+            v.id_variante_producto,
+            v.sku,
+            COALESCE(i.stock,0)::int AS stock,
+            i.id_almacen,
+            alm.nombre AS almacen_nombre,
+            COALESCE(v.activo, true) AS variante_activa,
+            p.activo AS producto_activo
+          FROM public.producto p
+          LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto
+          LEFT JOIN public.inventario i        ON i.id_variante_producto = v.id_variante_producto
+          LEFT JOIN public.almacen alm         ON alm.id_almacen = i.id_almacen
+          WHERE p.activo = true
+            AND (v.id_variante_producto IS NULL OR v.activo = true)
+            AND COALESCE(i.stock,0) <= $1
+          ORDER BY i.stock ASC, p.nombre, v.sku
+        `;
+        params = [threshold];
+      }
+
+      const { rows } = await pool.query(query, params);
       res.json({ threshold, data: rows });
     } catch (err) { next(err); }
   }
@@ -357,22 +387,48 @@ router.get('/reports/inventario/stock-actual',
   requireAuth, requireRole('admin', 'manager'),
   async (req, res, next) => {
     try {
-      const { rows } = await pool.query(
-        `
-        SELECT
-          p.id_producto,
-          p.nombre AS producto,
-          v.id_variante_producto,
-          v.sku,
-          COALESCE(i.stock,0)::int AS stock
-        FROM public.producto p
-        LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto
-        LEFT JOIN public.inventario i        ON i.id_variante_producto = v.id_variante_producto
-        WHERE p.activo = true
-          AND (v.id_variante_producto IS NULL OR v.activo = true)
-        ORDER BY p.nombre, v.sku
-        `
-      );
+      const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
+      let query = '';
+      let params = [];
+
+      if (idAlmacen) {
+        query = `
+          SELECT
+            p.id_producto,
+            p.nombre AS producto,
+            v.id_variante_producto,
+            v.sku,
+            COALESCE(i.stock,0)::int AS stock,
+            i.id_almacen,
+            alm.nombre AS almacen_nombre
+          FROM public.producto p
+          LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto
+          LEFT JOIN public.inventario i        ON i.id_variante_producto = v.id_variante_producto AND i.id_almacen = $1
+          LEFT JOIN public.almacen alm         ON alm.id_almacen = i.id_almacen
+          WHERE p.activo = true
+            AND (v.id_variante_producto IS NULL OR v.activo = true)
+          ORDER BY p.nombre, v.sku
+        `;
+        params = [idAlmacen];
+      } else {
+        query = `
+          SELECT
+            p.id_producto,
+            p.nombre AS producto,
+            v.id_variante_producto,
+            v.sku,
+            COALESCE(SUM(i.stock),0)::int AS stock
+          FROM public.producto p
+          LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto
+          LEFT JOIN public.inventario i        ON i.id_variante_producto = v.id_variante_producto
+          WHERE p.activo = true
+            AND (v.id_variante_producto IS NULL OR v.activo = true)
+          GROUP BY p.id_producto, p.nombre, v.id_variante_producto, v.sku
+          ORDER BY p.nombre, v.sku
+        `;
+      }
+
+      const { rows } = await pool.query(query, params);
       res.json({ data: rows });
     } catch (err) { next(err); }
   }

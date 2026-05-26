@@ -82,6 +82,7 @@ router.get('/products', async (req, res, next) => {
         p.necesita_revision,
         p.fecha_creacion,
         (SELECT url FROM public.imagen_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY es_principal DESC, id_imagen_producto ASC LIMIT 1) AS image,
+        (SELECT id_variante_producto FROM public.variante_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY id_variante_producto ASC LIMIT 1) AS default_variant_id,
         COUNT(DISTINCT vp.id_variante_producto)::int AS variants_count,
         COALESCE(SUM(inv.stock)::int, 0) AS total_stock
       FROM public.producto p
@@ -172,14 +173,8 @@ router.post('/products', requireAuth, requireRole('admin', 'manager'), async (re
         [newProduct.id_producto, generatedSku, initial_price, JSON.stringify({ Tipo: "Estándar" })]
       );
       defaultVariant = varRows[0];
-
-      // 3. Inicializar Inventario en 0
-      await client.query(
-        `INSERT INTO public.inventario (id_variante_producto, stock)
-         VALUES ($1, 0)`,
-        [defaultVariant.id_variante_producto]
-      );
     }
+
 
     // AUDITORIA
     await client.query(

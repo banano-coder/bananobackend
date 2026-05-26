@@ -32,15 +32,26 @@ function normCedula(v) {
  * 0) Buscar datos de cliente por cédula (para auto-relleno en frontend)
  * GET /api/guest/client/:cedula
  */
-router.get('/guest/client/:cedula', async (req, res, next) => {
+router.get(['/guest/client/:cedula', '/guest/cliente/:cedula'], async (req, res, next) => {
   try {
     const cedula = normCedula(req.params.cedula);
     if (!cedula) return res.status(400).json({ status: 'error', message: 'cedula es requerida' });
 
-    const { rows } = await pool.query(
-      `SELECT nombre, email, telefono FROM public.cliente WHERE cedula = $1`,
+    let { rows } = await pool.query(
+      `SELECT cedula, nombre, email, telefono FROM public.cliente WHERE cedula = $1`,
       [cedula]
     );
+
+    // Si es numérico puro y no tiene coincidencia exacta, probar con prefijos de Venezuela
+    if (rows.length === 0 && /^\d+$/.test(cedula)) {
+      const altRes = await pool.query(
+        `SELECT cedula, nombre, email, telefono FROM public.cliente WHERE cedula IN ($1, $2)`,
+        [`V${cedula}`, `E${cedula}`]
+      );
+      if (altRes.rows.length > 0) {
+        rows = altRes.rows;
+      }
+    }
 
     if (rows.length === 0) {
       return res.status(404).json({ status: 'error', message: 'Cliente no encontrado' });
@@ -278,6 +289,244 @@ router.post('/guest/checkout', async (req, res, next) => {
     return res.status(201).json({ id_pedido, waUrl });
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch { }
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * 1.5) POS Checkout (authenticated cashier)
+ * POST /api/pos/checkout
+ * Body:
+ * {
+ *   "items": [ { "id_variante_producto": 123, "cantidad": 2 }, ... ],
+ *   "cliente_cedula": "V12345678",
+ *   "cliente_nombre": "Carlos Perez",
+ *   "cliente_email": "carlos@gmail.com",
+ *   "cliente_telefono": "04123456789",
+ *   "nota": "Venta POS",
+ *   "id_cuenta": 1,
+ *   "moneda_pago": "USD",
+ *   "tasa_cambio": 1.0,
+ *   "monto_pago_real": 150.00
+ * }
+ */
+router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const {
+      items,
+      cliente_cedula,
+      cliente_nombre,
+      cliente_email,
+      cliente_telefono,
+      nota,
+      id_cuenta,
+      moneda_pago,
+      tasa_cambio,
+      monto_pago_real
+    } = req.body || {};
+
+    // 1. Validaciones básicas
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ status: 'error', message: 'items es requerido y no puede estar vacío' });
+    }
+    if (!cliente_cedula || !cliente_nombre) {
+      return res.status(400).json({ status: 'error', message: 'cliente_cedula y cliente_nombre son requeridos' });
+    }
+    if (!id_cuenta) {
+      return res.status(400).json({ status: 'error', message: 'id_cuenta es requerido' });
+    }
+
+    const targetCuentaId = parseInt(id_cuenta, 10);
+    const rate = tasa_cambio ? parseFloat(tasa_cambio) : 1.0;
+    const payReal = monto_pago_real ? parseFloat(monto_pago_real) : 0.0;
+    const payCurrency = moneda_pago || 'USD';
+
+    // Resolver sucursal y usuario
+    const idUsuario = req.user.id || req.user.sub;
+    const idAlmacen = req.body.id_almacen ? parseInt(req.body.id_almacen, 10) : (req.user.id_almacen ? parseInt(req.user.id_almacen, 10) : 1);
+
+    // Normalizar items
+    const normItems = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      const rawId = it.id_variante_producto ?? it.id_variante ?? it.id;
+      const idVar = Number.parseInt(rawId, 10);
+      const qty = Number.parseInt(it.cantidad, 10);
+      if (!Number.isInteger(idVar) || idVar <= 0) {
+        return res.status(400).json({ status: 'error', message: `Cada item debe tener id_variante_producto válido (ítem ${i + 1})` });
+      }
+      if (!Number.isInteger(qty) || qty <= 0) {
+        return res.status(400).json({ status: 'error', message: `Cantidad inválida para el ítem ${i + 1}` });
+      }
+      normItems.push({ id_variante_producto: idVar, cantidad: qty });
+    }
+    const ids = normItems.map(x => x.id_variante_producto);
+
+    // Traer variantes
+    const { rows: variantes } = await pool.query(
+      `
+      SELECT
+        vp.id_variante_producto,
+        vp.sku,
+        vp.precio_lista::numeric AS precio_lista,
+        vp.activo,
+        p.nombre AS nombre_producto
+      FROM public.variante_producto vp
+      JOIN public.producto p ON p.id_producto = vp.id_producto
+      WHERE vp.id_variante_producto = ANY($1::int[])
+      `,
+      [ids]
+    );
+    const mapVar = new Map(variantes.map(v => [Number(v.id_variante_producto), v]));
+
+    for (const it of normItems) {
+      const v = mapVar.get(Number(it.id_variante_producto));
+      if (!v) return res.status(400).json({ status: 'error', message: `Variante ${it.id_variante_producto} no existe` });
+      if (v.activo === false) return res.status(400).json({ status: 'error', message: `Variante ${it.id_variante_producto} inactiva` });
+    }
+
+    await client.query('BEGIN');
+
+    // 2. Upsert cliente
+    const clienteCedulaNorm = await upsertClienteByCedula(client, {
+      cedula: cliente_cedula,
+      nombre: cliente_nombre,
+      email: cliente_email || null,
+      telefono: cliente_telefono || null
+    });
+
+    // 3. Obtener y bloquear la cuenta de dinero para sumar el saldo
+    const { rows: cRows } = await client.query(
+      `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado 
+       FROM public.cuenta 
+       WHERE id_cuenta = $1 AND eliminado = false 
+       FOR UPDATE`,
+      [targetCuentaId]
+    );
+    if (!cRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'error', message: 'Cuenta bancaria/caja no encontrada' });
+    }
+    const cuenta = cRows[0];
+    if (!cuenta.activo) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ status: 'error', message: 'La cuenta seleccionada está desactivada' });
+    }
+
+    // 4. Crear el pedido
+    const { rows: ped } = await client.query(
+      `INSERT INTO public.pedido (
+        cedula_cliente, cliente_nombre, cliente_email, cliente_telefono, 
+        observacion, estado, origen, id_almacen, id_usuario, id_cuenta, 
+        moneda_pago, tasa_cambio, monto_pago_real
+       ) VALUES ($1, $2, $3, $4, $5, 'concretado', 'pos', $6, $7, $8, $9, $10, $11) 
+       RETURNING id_pedido`,
+      [
+        clienteCedulaNorm,
+        cliente_nombre,
+        cliente_email || null,
+        cliente_telefono || null,
+        nota || 'Venta POS',
+        idAlmacen,
+        idUsuario,
+        targetCuentaId,
+        payCurrency,
+        rate,
+        payReal
+      ]
+    );
+    const id_pedido = ped[0].id_pedido;
+
+    // 5. Insertar items, calcular total y aplicar decrementos de stock
+    const { aplicarMovimiento } = require('./inventario.routes');
+    let total = 0;
+
+    for (const it of normItems) {
+      const v = mapVar.get(Number(it.id_variante_producto));
+      const unit = Number(v.precio_lista || 0);
+      const sub = +(unit * it.cantidad).toFixed(2);
+
+      // Insertar item de pedido
+      await client.query(
+        `INSERT INTO public.pedido_item (id_pedido, id_variante_producto, nombre_producto, sku, cantidad, precio_unitario, subtotal)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [id_pedido, v.id_variante_producto, v.nombre_producto, v.sku, it.cantidad, unit, sub]
+      );
+      total += sub;
+
+      // Decrementar stock
+      await aplicarMovimiento({
+        client,
+        idVariante: v.id_variante_producto,
+        idAlmacen: idAlmacen,
+        tipo: 'salida',
+        cantidad: it.cantidad,
+        motivo: `Venta POS Pedido #${id_pedido}`,
+        refExterna: `PED-${id_pedido}`,
+        costoUnitario: null,
+        actorId: idUsuario
+      });
+    }
+
+    // Actualizar total_estimado en el pedido
+    await client.query(
+      `UPDATE public.pedido SET total_estimado = $2 WHERE id_pedido = $1`,
+      [id_pedido, total]
+    );
+
+    // 6. Registrar la transacción de caja (ingreso)
+    const { rows: tRows } = await client.query(
+      `INSERT INTO public.transaccion_caja (id_cuenta, tipo, monto_usd, tasa_cambio, monto_real, concepto, id_pedido, id_usuario)
+       VALUES ($1, 'ingreso', $2, $3, $4, $5, $6, $7)
+       RETURNING id_transaccion`,
+      [
+        targetCuentaId,
+        total, // monto_usd
+        rate,
+        payReal, // monto_real (en la moneda de pago)
+        `Venta POS Pedido #${id_pedido}`,
+        id_pedido,
+        idUsuario
+      ]
+    );
+
+    // 7. Sumar el monto pagado al saldo de la cuenta de dinero
+    const nuevoSaldo = +(cuenta.saldo + payReal).toFixed(2);
+    await client.query(
+      `UPDATE public.cuenta SET saldo = $2, updated_at = NOW() WHERE id_cuenta = $1`,
+      [targetCuentaId, nuevoSaldo]
+    );
+
+    // 8. Registrar auditoría general de creación del pedido
+    await client.query(
+      `INSERT INTO public.auditoria (actor_id, target_pedido_id, target_tipo, action, payload, created_at)
+       VALUES ($1, $2, 'pedido', 'PEDIDO_CREAR', $3::jsonb, NOW())`,
+      [
+        idUsuario,
+        id_pedido,
+        JSON.stringify({
+          cedula_cliente: clienteCedulaNorm,
+          cliente_nombre,
+          total,
+          items: normItems,
+          id_cuenta: targetCuentaId,
+          moneda_pago: payCurrency,
+          tasa_cambio: rate,
+          monto_pago_real: payReal,
+          id_almacen: idAlmacen
+        })
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ status: 'success', id_pedido });
+
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { }
+    if (err.status) return res.status(err.status).json({ status: 'error', message: err.message });
     next(err);
   } finally {
     client.release();
