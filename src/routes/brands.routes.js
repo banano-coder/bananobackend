@@ -78,7 +78,11 @@ router.delete('/brands/:id', requireAuth, requireRole('admin', 'manager'), async
     await client.query('BEGIN');
 
     const { rows: brandRows } = await client.query(`SELECT nombre FROM public.marca WHERE id_marca = $1`, [id]);
-    const brandName = brandRows[0]?.nombre || 'Desconocida';
+    if (!brandRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Marca no encontrada' }); }
+    const brandName = brandRows[0].nombre;
+
+    const { rows: hasProd } = await client.query(`SELECT 1 FROM public.producto WHERE id_marca=$1 AND activo=true LIMIT 1`, [id]);
+    if (hasProd.length) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'No se puede eliminar: hay productos activos asociados a esta marca' }); }
 
     const { rowCount } = await client.query(`UPDATE public.marca SET activo=false, eliminado=true WHERE id_marca=$1 AND eliminado=false`, [id]);
     if (!rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'No encontrada o ya eliminada' }); }

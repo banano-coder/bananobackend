@@ -85,16 +85,16 @@ router.delete('/categories/:id', requireAuth, requireRole('admin', 'manager'), a
     const { rows: hasProd } = await client.query(`SELECT 1 FROM public.producto WHERE id_categoria=$1 AND activo=true LIMIT 1`, [id]);
     if (hasProd.length) { await client.query('ROLLBACK'); return res.status(400).json({ message: 'No se puede eliminar: hay productos activos en esta categoria' }); }
 
-    const { rowCount } = await client.query(`UPDATE public.categoria SET activo=false WHERE id_categoria=$1`, [id]);
-    if (!rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'No encontrada' }); }
+    const { rowCount } = await client.query(`UPDATE public.categoria SET activo=false, eliminado=true WHERE id_categoria=$1 AND eliminado=false`, [id]);
+    if (!rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'No encontrada o ya eliminada' }); }
 
     await client.query(`
       INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
-      VALUES ($1, 'categoria', 'CAT_DISABLE', $2::jsonb, NOW())
+      VALUES ($1, 'categoria', 'CAT_SOFT_DELETE', $2::jsonb, NOW())
     `, [req.user.id || req.user.sub, JSON.stringify({ id_categoria: id })]);
 
     await client.query('COMMIT');
-    res.json({ message: 'Categoria desactivada' });
+    res.json({ message: 'Categoria desactivada (eliminada)' });
   } catch (err) { try { await client.query('ROLLBACK'); } catch { } next(err); }
   finally { client.release(); }
 });

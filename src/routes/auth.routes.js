@@ -19,7 +19,7 @@ router.post('/login', async (req, res, next) => {
 
     // Buscar usuario
     const { rows } = await pool.query(
-      `SELECT id_usuario, nombre, email, password, activo
+      `SELECT id_usuario, nombre, email, password, activo, id_almacen
        FROM public.usuario
        WHERE email = $1 AND eliminado = false
        LIMIT 1`,
@@ -60,7 +60,7 @@ router.post('/login', async (req, res, next) => {
 
     // Generar token
     const token = jwt.sign(
-      { id: user.id_usuario, email: user.email, roles },
+      { id: user.id_usuario, email: user.email, roles, id_almacen: user.id_almacen },
       env.JWT_SECRET,
       { expiresIn: '2h' }
     );
@@ -69,7 +69,7 @@ router.post('/login', async (req, res, next) => {
       message: 'Login exitoso',
       token,
       user: {
-        id_usuario: user.id_usuario, nombre: user.nombre, email: user.email, roles
+        id_usuario: user.id_usuario, nombre: user.nombre, email: user.email, roles, id_almacen: user.id_almacen
       }
     });
   } catch (err) {

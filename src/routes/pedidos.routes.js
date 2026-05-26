@@ -295,6 +295,7 @@ router.get('/pedidos', requireAuth, requireRole('admin', 'manager', 'vendedor'),
     const from = (req.query.from || '').trim();
     const to = (req.query.to || '').trim();
     const search = (req.query.search || '').trim();
+    const id_almacen = toInt(req.query.id_almacen, null);
     const page = Math.max(1, toInt(req.query.page, 1));
     const limit = Math.min(100, Math.max(1, toInt(req.query.limit, 20)));
     const offset = (page - 1) * limit;
@@ -310,6 +311,18 @@ router.get('/pedidos', requireAuth, requireRole('admin', 'manager', 'vendedor'),
       conds.push(`(p.cliente_nombre ILIKE $${i})`);
       params.push(`%${search}%`); i++;
     }
+
+    // Restricción por sucursal: Vendedor solo ve pedidos de su almacén. Admin/manager filtra opcionalmente.
+    const roles = req.user?.roles || [];
+    const isVendor = roles.includes('vendedor') && !roles.some(r => r === 'admin' || r === 'manager');
+    if (isVendor && req.user?.id_almacen) {
+      conds.push(`p.id_almacen = $${i++}`);
+      params.push(req.user.id_almacen);
+    } else if (id_almacen) {
+      conds.push(`p.id_almacen = $${i++}`);
+      params.push(id_almacen);
+    }
+
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
     const allowedSort = new Set(['created_at', 'estado', 'total']);
@@ -324,8 +337,11 @@ router.get('/pedidos', requireAuth, requireRole('admin', 'manager', 'vendedor'),
     const { rows: data } = await pool.query(
       `
       SELECT p.id_pedido, p.cedula_cliente, p.origen, p.cliente_nombre, p.cliente_email, p.cliente_telefono,
-             p.total_estimado::float AS total_estimado, p.estado, p.created_at, p.updated_at
+             p.total_estimado::float AS total_estimado, p.estado, p.created_at, p.updated_at,
+             p.id_almacen, alm.nombre AS almacen_nombre,
+             p.moneda_pago, p.tasa_cambio::float AS tasa_cambio, p.monto_pago_real::float AS monto_pago_real
       FROM public.pedido p
+      LEFT JOIN public.almacen alm ON alm.id_almacen = p.id_almacen
       ${where}
       ORDER BY ${sortCol} ${dir}
       LIMIT ${limit} OFFSET ${offset}
@@ -347,14 +363,28 @@ router.get('/pedidos/:id', requireAuth, requireRole('admin', 'manager', 'vendedo
 
     const { rows: head } = await pool.query(
       `
-      SELECT id_pedido, cedula_cliente, origen, cliente_nombre, cliente_email, cliente_telefono,
-             total_estimado::float AS total_estimado, estado, whatsapp_text, whatsapp_link,
-             observacion, created_at, updated_at
-      FROM public.pedido WHERE id_pedido = $1
+      SELECT p.id_pedido, p.cedula_cliente, p.origen, p.cliente_nombre, p.cliente_email, p.cliente_telefono,
+             p.total_estimado::float AS total_estimado, p.estado, p.whatsapp_text, p.whatsapp_link,
+             p.observacion, p.created_at, p.updated_at,
+             p.id_almacen, alm.nombre AS almacen_nombre,
+             p.id_cuenta, cta.nombre AS cuenta_nombre,
+             p.id_usuario, usr.nombre AS vendedor_nombre,
+             p.moneda_pago, p.tasa_cambio::float AS tasa_cambio, p.monto_pago_real::float AS monto_pago_real
+      FROM public.pedido p
+      LEFT JOIN public.almacen alm ON alm.id_almacen = p.id_almacen
+      LEFT JOIN public.cuenta cta ON cta.id_cuenta = p.id_cuenta
+      LEFT JOIN public.usuario usr ON usr.id_usuario = p.id_usuario
+      WHERE p.id_pedido = $1
       `,
       [id]
     );
     if (!head.length) return res.status(404).json({ message: 'Pedido no encontrado' });
+
+    const roles = req.user?.roles || [];
+    const isVendor = roles.includes('vendedor') && !roles.some(r => r === 'admin' || r === 'manager');
+    if (isVendor && req.user?.id_almacen && head[0].id_almacen && head[0].id_almacen !== req.user.id_almacen) {
+      return res.status(403).json({ message: 'No autorizado para ver pedidos de otra sucursal' });
+    }
 
     const { rows: items } = await pool.query(
       `

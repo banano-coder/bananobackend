@@ -4,10 +4,71 @@ const { requireAuth, requireRole } = require('../middlewares/requireAuth');
 
 const router = Router();
 
-// LISTAR (últimos 50) con categoría/marca y stock agregado
+// LISTAR con categoría/marca, stock agregado, filtrado y paginación
 router.get('/products', async (req, res, next) => {
   try {
-    const { search } = req.query;
+    const { search, id_categoria, id_marca, status, id_almacen } = req.query;
+    const page = Math.max(1, parseInt(req.query.page || '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
+    const offset = (page - 1) * limit;
+
+    const conds = ['p.eliminado = false'];
+    const params = [];
+    let paramIndex = 1;
+
+    if (search) {
+      conds.push(`(p.nombre ILIKE $${paramIndex} OR c.nombre ILIKE $${paramIndex} OR m.nombre ILIKE $${paramIndex})`);
+      params.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    if (id_categoria) {
+      conds.push(`p.id_categoria = $${paramIndex}`);
+      params.push(parseInt(id_categoria, 10));
+      paramIndex++;
+    }
+
+    if (id_marca) {
+      conds.push(`p.id_marca = $${paramIndex}`);
+      params.push(parseInt(id_marca, 10));
+      paramIndex++;
+    }
+
+    if (status === 'activo') {
+      conds.push(`p.activo = true AND p.necesita_revision = false`);
+    } else if (status === 'inactivo') {
+      conds.push(`p.activo = false`);
+    } else if (status === 'borrador') {
+      conds.push(`p.necesita_revision = true`);
+    }
+
+    const whereClause = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+    // Conteo total para paginación
+    const countQuery = `
+      SELECT COUNT(DISTINCT p.id_producto)::int AS total
+      FROM public.producto p
+      LEFT JOIN public.categoria c ON c.id_categoria = p.id_categoria
+      LEFT JOIN public.marca m     ON m.id_marca     = p.id_marca
+      ${whereClause}
+    `;
+    const { rows: countRows } = await pool.query(countQuery, params);
+    const total = countRows[0]?.total || 0;
+
+    // Consulta de registros con límite y offset, soportando id_almacen
+    const idAlmacen = id_almacen ? parseInt(id_almacen, 10) : null;
+    const mainParams = [...params];
+    let mainParamIndex = paramIndex;
+
+    if (idAlmacen) {
+      mainParams.push(idAlmacen);
+      mainParamIndex++;
+    }
+
+    const limitIndex = mainParamIndex;
+    const offsetIndex = mainParamIndex + 1;
+    mainParams.push(limit, offset);
+
     let query = `
       SELECT
         p.id_producto,
@@ -21,30 +82,22 @@ router.get('/products', async (req, res, next) => {
         p.necesita_revision,
         p.fecha_creacion,
         (SELECT url FROM public.imagen_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY es_principal DESC, id_imagen_producto ASC LIMIT 1) AS image,
-        COUNT(vp.id_variante_producto)::int AS variants_count,
+        COUNT(DISTINCT vp.id_variante_producto)::int AS variants_count,
         COALESCE(SUM(inv.stock)::int, 0) AS total_stock
       FROM public.producto p
       LEFT JOIN public.categoria c ON c.id_categoria = p.id_categoria
       LEFT JOIN public.marca m     ON m.id_marca     = p.id_marca
       LEFT JOIN public.variante_producto vp ON vp.id_producto = p.id_producto
       LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp.id_variante_producto
-      WHERE p.eliminado = false
-    `;
-
-    const values = [];
-    if (search) {
-      query += ` AND (p.nombre ILIKE $1 OR c.nombre ILIKE $1 OR m.nombre ILIKE $1) `;
-      values.push(`%${search}%`);
-    }
-
-    query += `
+        ${idAlmacen ? `AND inv.id_almacen = $${paramIndex}` : ''}
+      ${whereClause}
       GROUP BY p.id_producto, c.nombre, m.nombre, p.necesita_revision
       ORDER BY p.fecha_creacion DESC
-      LIMIT 100
+      LIMIT $${limitIndex} OFFSET $${offsetIndex}
     `;
 
-    const { rows } = await pool.query(query, values);
-    res.json(rows);
+    const { rows } = await pool.query(query, mainParams);
+    res.json({ data: rows, page, limit, total });
   } catch (err) {
     next(err);
   }

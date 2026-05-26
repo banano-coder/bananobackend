@@ -13,6 +13,7 @@ const router = Router();
 async function aplicarMovimiento({
   client,
   idVariante,
+  idAlmacen = 1,
   tipo,
   cantidad,
   motivo,
@@ -20,28 +21,30 @@ async function aplicarMovimiento({
   costoUnitario,
   actorId
 }) {
-  // bloquea inventario de la variante
+  const finalAlmacenId = parseInt(idAlmacen, 10) || 1;
+
+  // bloquea inventario de la variante en el almacén específico
   const invRow = await client.query(
     `SELECT id_variante_producto, COALESCE(stock,0)::int AS stock
        FROM public.inventario
-      WHERE id_variante_producto = $1
+      WHERE id_variante_producto = $1 AND id_almacen = $2
       FOR UPDATE`,
-    [idVariante]
+    [idVariante, finalAlmacenId]
   );
 
   let stockActual;
   if (!invRow.rows.length) {
     await client.query(
-      `INSERT INTO public.inventario (id_variante_producto, stock)
-       VALUES ($1, 0)`,
-      [idVariante]
+      `INSERT INTO public.inventario (id_variante_producto, id_almacen, stock)
+       VALUES ($1, $2, 0)`,
+      [idVariante, finalAlmacenId]
     );
     const again = await client.query(
       `SELECT id_variante_producto, COALESCE(stock,0)::int AS stock
          FROM public.inventario
-        WHERE id_variante_producto = $1
+        WHERE id_variante_producto = $1 AND id_almacen = $2
         FOR UPDATE`,
-      [idVariante]
+      [idVariante, finalAlmacenId]
     );
     stockActual = again.rows[0].stock;
   } else {
@@ -84,18 +87,18 @@ async function aplicarMovimiento({
   // actualiza inventario
   await client.query(
     `UPDATE public.inventario
-        SET stock=$2, updated_at=NOW()
-      WHERE id_variante_producto=$1`,
-    [idVariante, stockNuevo]
+        SET stock=$3, updated_at=NOW()
+      WHERE id_variante_producto=$1 AND id_almacen=$2`,
+    [idVariante, finalAlmacenId, stockNuevo]
   );
 
   // inserta movimiento en tu tabla
   const { rows: movRows } = await client.query(
     `INSERT INTO public.movimiento_inventario
-       (id_variante_producto, tipo, cantidad, motivo, ref_externa, costo_unitario, id_usuario)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
+       (id_variante_producto, id_almacen, tipo, cantidad, motivo, ref_externa, costo_unitario, id_usuario)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
      RETURNING id_movimiento_inventario, created_at`,
-    [idVariante, t, cant, motivo || null, refExterna || null, costo, actorId || null]
+    [idVariante, finalAlmacenId, t, cant, motivo || null, refExterna || null, costo, actorId || null]
   );
   const mov = movRows[0];
 
@@ -109,6 +112,7 @@ async function aplicarMovimiento({
       JSON.stringify({
         id_movimiento_inventario: mov.id_movimiento_inventario,
         id_variante_producto: idVariante,
+        id_almacen: finalAlmacenId,
         tipo: t,
         cantidad: cant,
         motivo: motivo || null,
@@ -142,7 +146,7 @@ async function aplicarMovimiento({
 router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const { id_variante_producto, tipo, cantidad, motivo, ref_externa, costo_unitario } = req.body || {};
+    const { id_variante_producto, id_almacen, tipo, cantidad, motivo, ref_externa, costo_unitario } = req.body || {};
 
     // autorización por tipo
     const roles = req.user?.roles || [];
@@ -156,6 +160,18 @@ router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
 
     const idVar = parseInt(id_variante_producto, 10);
     if (!Number.isInteger(idVar) || idVar <= 0) return res.status(400).json({ message: 'id_variante_producto inválido' });
+
+    let idAlm = parseInt(id_almacen, 10);
+    if (!idAlm) {
+      idAlm = req.user.id_almacen ? parseInt(req.user.id_almacen, 10) : 1;
+    }
+    if (!Number.isInteger(idAlm) || idAlm <= 0) return res.status(400).json({ message: 'id_almacen inválido' });
+
+    // Restringir vendedor a su propia sucursal
+    const isVendedor = roles.includes('vendedor');
+    if (isVendedor && idAlm !== req.user.id_almacen) {
+      return res.status(403).json({ message: 'No autorizado para operar en otra sucursal' });
+    }
 
     await client.query('BEGIN');
 
@@ -175,6 +191,7 @@ router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
     const result = await aplicarMovimiento({
       client,
       idVariante: idVar,
+      idAlmacen: idAlm,
       tipo,
       cantidad,
       motivo,
@@ -202,10 +219,17 @@ router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
  * Roles: admin, manager
  * (si quieres que vendedor vea solo 'salida', avísame y filtro)
  */
-router.get('/inventario/movimientos', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.get('/inventario/movimientos', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   try {
     const tipo = (req.query.tipo || '').trim();
     const idVar = parseInt(req.query.id_variante || '0', 10);
+    
+    const roles = req.user?.roles || [];
+    const isVendedor = roles.includes('vendedor');
+    let idAlmacen = parseInt(req.query.id_almacen || '0', 10);
+    if (isVendedor) {
+      idAlmacen = req.user.id_almacen ? parseInt(req.user.id_almacen, 10) : 1;
+    }
     const from = (req.query.from || '').trim();
     const to = (req.query.to || '').trim();
     const page = Math.max(1, parseInt(req.query.page || '1', 10));
@@ -218,6 +242,7 @@ router.get('/inventario/movimientos', requireAuth, requireRole('admin', 'manager
 
     if (tipo) { conds.push(`m.tipo = $${i++}`); params.push(tipo); }
     if (idVar) { conds.push(`m.id_variante_producto = $${i++}`); params.push(idVar); }
+    if (idAlmacen) { conds.push(`m.id_almacen = $${i++}`); params.push(idAlmacen); }
     if (from) { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
     if (to) { conds.push(`m.created_at < ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
 
@@ -232,15 +257,16 @@ router.get('/inventario/movimientos', requireAuth, requireRole('admin', 'manager
     const total = t[0].total;
 
     const { rows: data } = await pool.query(
-      `SELECT m.id_movimiento_inventario, m.id_variante_producto, m.tipo, m.cantidad,
+      `SELECT m.id_movimiento_inventario, m.id_variante_producto, m.id_almacen, m.tipo, m.cantidad,
               m.motivo, m.ref_externa, m.costo_unitario,
               m.id_usuario, u.nombre AS usuario_nombre,
               v.sku, p.nombre AS producto_nombre,
-              m.created_at
+              m.created_at, alm.nombre AS almacen_nombre
          FROM public.movimiento_inventario m
          LEFT JOIN public.usuario u ON u.id_usuario = m.id_usuario
          JOIN public.variante_producto v ON v.id_variante_producto = m.id_variante_producto
          JOIN public.producto p          ON p.id_producto = v.id_producto
+         LEFT JOIN public.almacen alm    ON alm.id_almacen = m.id_almacen
         ${where}
         ORDER BY m.created_at DESC
         LIMIT ${limit} OFFSET ${offset}`,
@@ -256,14 +282,23 @@ router.get('/inventario/stock/:id', requireAuth, requireRole('admin', 'manager',
   try {
     const idVar = parseInt(req.params.id, 10);
     if (!Number.isInteger(idVar) || idVar <= 0) return res.status(400).json({ message: 'id inválido' });
-    const { rows } = await pool.query(
-      `SELECT COALESCE(stock,0)::int AS stock
-         FROM public.inventario
-        WHERE id_variante_producto = $1`,
-      [idVar]
-    );
-    res.json({ id_variante_producto: idVar, stock: rows.length ? rows[0].stock : 0 });
+    
+    const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
+
+    let query = '';
+    let params = [];
+    if (idAlmacen) {
+      query = `SELECT COALESCE(stock,0)::int AS stock FROM public.inventario WHERE id_variante_producto = $1 AND id_almacen = $2`;
+      params = [idVar, idAlmacen];
+    } else {
+      query = `SELECT COALESCE(SUM(stock),0)::int AS stock FROM public.inventario WHERE id_variante_producto = $1`;
+      params = [idVar];
+    }
+
+    const { rows } = await pool.query(query, params);
+    res.json({ id_variante_producto: idVar, id_almacen: idAlmacen, stock: rows.length ? rows[0].stock : 0 });
   } catch (err) { next(err); }
 });
 
+router.aplicarMovimiento = aplicarMovimiento;
 module.exports = router;

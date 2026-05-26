@@ -31,7 +31,7 @@ async function getUserRoles(userId, client = pool) {
 router.post('/users', requireAuth, requireRole('admin'), async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const { nombre, email, password, rol } = req.body || {};
+    const { nombre, email, password, rol, id_almacen } = req.body || {};
     if (!nombre || !email || !password) {
       return res.status(400).json({ message: 'nombre, email y password son requeridos' });
     }
@@ -50,10 +50,10 @@ router.post('/users', requireAuth, requireRole('admin'), async (req, res, next) 
 
     const hashed = await bcrypt.hash(String(password), 10);
     const { rows: userRows } = await client.query(
-      `INSERT INTO public.usuario (nombre, email, password, activo)
-       VALUES ($1, $2, $3, true)
-       RETURNING id_usuario, nombre, email, activo`,
-      [nombre, emailNorm, hashed]
+      `INSERT INTO public.usuario (nombre, email, password, activo, id_almacen)
+       VALUES ($1, $2, $3, true, $4)
+       RETURNING id_usuario, nombre, email, activo, id_almacen`,
+      [nombre, emailNorm, hashed, id_almacen ? parseInt(id_almacen, 10) : null]
     );
     const user = userRows[0];
 
@@ -106,14 +106,15 @@ router.get('/users', requireAuth, requireRole('admin'), async (req, res, next) =
     const total = totalRows[0].total;
 
     const { rows: data } = await pool.query(`
-      SELECT u.id_usuario, u.nombre, u.email, u.activo,
+      SELECT u.id_usuario, u.nombre, u.email, u.activo, u.id_almacen, alm.nombre AS almacen_nombre,
              COALESCE(json_agg(r.nombre) FILTER (WHERE r.nombre IS NOT NULL), '[]') AS roles
       FROM public.usuario u
       LEFT JOIN public.usuario_rol ur ON ur.id_usuario = u.id_usuario
       LEFT JOIN public.rol r ON r.id_rol = ur.id_rol
+      LEFT JOIN public.almacen alm   ON alm.id_almacen = u.id_almacen
       WHERE u.eliminado = false
         AND ($1 = '' OR u.nombre ILIKE '%'||$1||'%' OR u.email ILIKE '%'||$1||'%')
-      GROUP BY u.id_usuario
+      GROUP BY u.id_usuario, alm.nombre
       ORDER BY ${sort} ${dir}
       LIMIT $2 OFFSET $3
     `, [search, limit, offset]);
@@ -261,6 +262,50 @@ router.patch('/users/:id/password', requireAuth, requireRole('admin'), async (re
     res.json({ message: 'Contraseña actualizada por admin' });
   } catch (err) {
     next(err);
+  }
+});
+
+/** 5.5) WAREHOUSE: PATCH /api/users/:id/warehouse (solo admin)
+ * Body: { id_almacen: number | null }
+ */
+router.patch('/users/:id/warehouse', requireAuth, requireRole('admin'), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const targetId = parseInt(req.params.id, 10);
+    const id_almacen = req.body?.id_almacen ? parseInt(req.body.id_almacen, 10) : null;
+
+    await client.query('BEGIN');
+
+    if (id_almacen) {
+      const { rows } = await client.query(`SELECT 1 FROM public.almacen WHERE id_almacen = $1 AND eliminado = false`, [id_almacen]);
+      if (!rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: 'El almacén no existe o está eliminado' });
+      }
+    }
+
+    const { rowCount } = await client.query(
+      `UPDATE public.usuario SET id_almacen = $2 WHERE id_usuario = $1`,
+      [targetId, id_almacen]
+    );
+    if (!rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+
+    await client.query(
+      `INSERT INTO public.auditoria (actor_id, target_usuario_id, target_tipo, action, payload, created_at)
+       VALUES ($1, $2, 'usuario', 'ASSIGN_WAREHOUSE', $3::jsonb, NOW())`,
+      [req.user.id || req.user.sub, targetId, JSON.stringify({ id_almacen })]
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Almacén de trabajo actualizado', id_almacen });
+  } catch (err) {
+    await pool.query('ROLLBACK').catch(() => { });
+    next(err);
+  } finally {
+    client.release();
   }
 });
 

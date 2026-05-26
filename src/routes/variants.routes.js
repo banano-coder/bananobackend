@@ -14,15 +14,34 @@ router.get('/products/:id/variants', requireAuth, requireRole('admin', 'manager'
   try {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ message: 'id inválido' });
-    const { rows } = await pool.query(`
-      SELECT vp.id_variante_producto, vp.id_producto, vp.sku, vp.precio_lista::float AS precio_lista,
-             vp.costo::float AS costo, vp.codigo_barras, vp.atributos_json, vp.activo,
-             COALESCE(inv.stock, 0)::int AS stock_actual
-      FROM public.variante_producto vp
-      LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp.id_variante_producto
-      WHERE vp.id_producto = $1
-      ORDER BY vp.id_variante_producto
-    `, [id]);
+    
+    const id_almacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
+    let queryText;
+    let queryParams;
+
+    if (id_almacen) {
+      queryText = `
+        SELECT vp.id_variante_producto, vp.id_producto, vp.sku, vp.precio_lista::float AS precio_lista,
+               vp.costo::float AS costo, vp.codigo_barras, vp.atributos_json, vp.activo,
+               COALESCE((SELECT stock FROM public.inventario WHERE id_variante_producto = vp.id_variante_producto AND id_almacen = $2), 0)::int AS stock_actual
+        FROM public.variante_producto vp
+        WHERE vp.id_producto = $1
+        ORDER BY vp.id_variante_producto
+      `;
+      queryParams = [id, id_almacen];
+    } else {
+      queryText = `
+        SELECT vp.id_variante_producto, vp.id_producto, vp.sku, vp.precio_lista::float AS precio_lista,
+               vp.costo::float AS costo, vp.codigo_barras, vp.atributos_json, vp.activo,
+               COALESCE((SELECT SUM(stock) FROM public.inventario WHERE id_variante_producto = vp.id_variante_producto), 0)::int AS stock_actual
+        FROM public.variante_producto vp
+        WHERE vp.id_producto = $1
+        ORDER BY vp.id_variante_producto
+      `;
+      queryParams = [id];
+    }
+
+    const { rows } = await pool.query(queryText, queryParams);
     res.json({ data: rows });
   } catch (err) { next(err); }
 });
@@ -164,10 +183,7 @@ router.delete('/variants/:id', requireAuth, requireRole('admin', 'manager'), asy
     await client.query('BEGIN');
 
     const { rows: stk } = await client.query(`
-      SELECT COALESCE(i.stock,0)::int AS stock
-      FROM public.variante_producto v
-      LEFT JOIN public.inventario i ON i.id_variante_producto = v.id_variante_producto
-      WHERE v.id_variante_producto = $1
+      SELECT COALESCE((SELECT SUM(stock) FROM public.inventario WHERE id_variante_producto = $1), 0)::int AS stock
     `, [id]);
     if (stk.length && stk[0].stock > 0) {
       await client.query('ROLLBACK');

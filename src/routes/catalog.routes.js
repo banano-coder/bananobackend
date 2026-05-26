@@ -197,19 +197,17 @@ router.get('/catalog/products/:id', async (req, res, next) => {
     );
     product.imagenes = imgs.map(r => r.url);
 
-    // Variantes + stock (JOIN inventario)
+    // Variantes + stock (Consolidado de almacenes)
     const { rows: variants } = await pool.query(
       `
       SELECT
         vp.id_variante_producto AS id,
         vp.sku,
         vp.precio_lista::float AS precio_lista,
-        COALESCE(inv.stock, 0)::int AS stock,
+        COALESCE((SELECT SUM(stock) FROM public.inventario WHERE id_variante_producto = vp.id_variante_producto), 0)::int AS stock,
         vp.atributos_json,
         vp.activo
       FROM public.variante_producto vp
-      LEFT JOIN public.inventario inv
-        ON inv.id_variante_producto = vp.id_variante_producto
       WHERE vp.id_producto = $1 AND vp.activo = true
       ORDER BY vp.id_variante_producto ASC
       `,
@@ -234,12 +232,10 @@ router.get('/catalog/products/:id/variants', async (req, res, next) => {
         vp.id_variante_producto AS id,
         vp.sku,
         vp.precio_lista::float AS precio_lista,
-        COALESCE(inv.stock, 0)::int AS stock,
+        COALESCE((SELECT SUM(stock) FROM public.inventario WHERE id_variante_producto = vp.id_variante_producto), 0)::int AS stock,
         vp.atributos_json,
         vp.activo
       FROM public.variante_producto vp
-      LEFT JOIN public.inventario inv
-        ON inv.id_variante_producto = vp.id_variante_producto
       WHERE vp.id_producto = $1 AND vp.activo = true
       ORDER BY vp.id_variante_producto ASC
       `,
