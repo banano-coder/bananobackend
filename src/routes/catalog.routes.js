@@ -92,7 +92,7 @@ router.get('/catalog/products', async (req, res, next) => {
     const dir = (req.query.dir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
     // Filtro de búsqueda
-    const searchSql = q ? `AND (p.nombre ILIKE $1 OR p.sku_base ILIKE $1)` : '';
+    const searchSql = q ? `AND (p.nombre ILIKE $1 OR p.sku_base ILIKE $1 OR EXISTS (SELECT 1 FROM public.variante_producto vp3 WHERE vp3.id_producto = p.id_producto AND (vp3.sku ILIKE $1 OR vp3.codigo_barras ILIKE $1)))` : '';
 
     // Filtro de stock (calculado como suma de stock de variantes)
     const stockFilterSql = ocultarSinStock

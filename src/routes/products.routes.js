@@ -17,7 +17,7 @@ router.get('/products', async (req, res, next) => {
     let paramIndex = 1;
 
     if (search) {
-      conds.push(`(p.nombre ILIKE $${paramIndex} OR c.nombre ILIKE $${paramIndex} OR m.nombre ILIKE $${paramIndex})`);
+      conds.push(`(p.nombre ILIKE $${paramIndex} OR c.nombre ILIKE $${paramIndex} OR m.nombre ILIKE $${paramIndex} OR EXISTS (SELECT 1 FROM public.variante_producto vp2 WHERE vp2.id_producto = p.id_producto AND (vp2.sku ILIKE $${paramIndex} OR vp2.codigo_barras ILIKE $${paramIndex})))`);
       params.push(`%${search}%`);
       paramIndex++;
     }
