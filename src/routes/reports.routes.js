@@ -233,12 +233,14 @@ router.get('/reports/inventario/top-salidas',
       const from = parseDate(req.query.from);
       const to = parseDate(req.query.to);
       const limit = toInt(req.query.limit, 10);
+      const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
 
       const conds = [`m.tipo='salida'`];
       const params = [];
       let i = 1;
       if (from) { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
       if (to) { conds.push(`m.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+      if (idAlmacen) { conds.push(`m.id_almacen = $${i++}`); params.push(idAlmacen); }
       const where = `WHERE ${conds.join(' AND ')}`;
 
       const { rows } = await pool.query(
@@ -277,12 +279,14 @@ router.get('/reports/inventario/salidas-serie',
       const from = parseDate(req.query.from);
       const to = parseDate(req.query.to);
       const gran = (req.query.granularity || 'month').toLowerCase() === 'day' ? 'day' : 'month';
+      const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
 
       const conds = [`m.tipo='salida'`];
       const params = [];
       let i = 1;
       if (from) { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
       if (to) { conds.push(`m.created_at <  ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+      if (idAlmacen) { conds.push(`m.id_almacen = $${i++}`); params.push(idAlmacen); }
       const where = `WHERE ${conds.join(' AND ')}`;
 
       const { rows } = await pool.query(
@@ -444,6 +448,7 @@ router.get('/reports/movimientos/kpis',
     try {
       const from = parseDate(req.query.from);
       const to = parseDate(req.query.to);
+      const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
 
       const conds = [`m.tipo = 'salida'`];
       const params = [];
@@ -451,6 +456,7 @@ router.get('/reports/movimientos/kpis',
 
       if (from) { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
       if (to) { conds.push(`m.created_at < ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+      if (idAlmacen) { conds.push(`m.id_almacen = $${i++}`); params.push(idAlmacen); }
       const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
       const { rows } = await pool.query(
@@ -480,6 +486,7 @@ router.get('/reports/movimientos/detalle',
     try {
       const from = parseDate(req.query.from);
       const to = parseDate(req.query.to);
+      const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
 
       const conds = [`m.tipo = 'salida'`];
       const params = [];
@@ -487,6 +494,7 @@ router.get('/reports/movimientos/detalle',
 
       if (from) { conds.push(`m.created_at >= $${i++}::timestamptz`); params.push(from); }
       if (to) { conds.push(`m.created_at < ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
+      if (idAlmacen) { conds.push(`m.id_almacen = $${i++}`); params.push(idAlmacen); }
       const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
       const { rows } = await pool.query(
@@ -501,11 +509,14 @@ router.get('/reports/movimientos/detalle',
           m.ref_externa AS referencia,
           u.nombre AS autorizado_por,
           COALESCE(m.costo_unitario,0)::float AS costo_unit,
-          COALESCE(m.cantidad * m.costo_unitario, 0)::float AS subtotal
+          COALESCE(m.cantidad * m.costo_unitario, 0)::float AS subtotal,
+          m.id_almacen,
+          alm.nombre AS almacen_nombre
         FROM public.movimiento_inventario m
         JOIN public.variante_producto v ON v.id_variante_producto = m.id_variante_producto
         JOIN public.producto p          ON p.id_producto = v.id_producto
         LEFT JOIN public.usuario u      ON u.id_usuario = m.id_usuario
+        LEFT JOIN public.almacen alm     ON alm.id_almacen = m.id_almacen
         ${where}
         ORDER BY m.created_at DESC
         `,

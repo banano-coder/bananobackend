@@ -7,14 +7,22 @@ const router = Router();
 // LISTAR cuentas activas
 router.get('/cuentas', requireAuth, async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT c.id_cuenta, c.nombre, c.moneda, c.saldo::float AS saldo, 
-              c.id_almacen, alm.nombre AS almacen_nombre, c.activo, c.created_at
-       FROM public.cuenta c
-       LEFT JOIN public.almacen alm ON alm.id_almacen = c.id_almacen
-       WHERE c.eliminado = false
-       ORDER BY c.nombre ASC`
-    );
+    const id_almacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
+    let queryText = `
+      SELECT c.id_cuenta, c.nombre, c.moneda, c.saldo::float AS saldo, 
+             c.id_almacen, alm.nombre AS almacen_nombre, c.activo, c.created_at
+      FROM public.cuenta c
+      LEFT JOIN public.almacen alm ON alm.id_almacen = c.id_almacen
+      WHERE c.eliminado = false
+    `;
+    const params = [];
+    if (id_almacen) {
+      queryText += ` AND c.id_almacen = $1`;
+      params.push(id_almacen);
+    }
+    queryText += ` ORDER BY c.nombre ASC`;
+
+    const { rows } = await pool.query(queryText, params);
     res.json(rows);
   } catch (err) {
     next(err);

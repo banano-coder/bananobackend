@@ -19,13 +19,13 @@ router.get('/products/:id/variants', requireAuth, requireRole('admin', 'manager'
     let queryText;
     let queryParams;
 
-    if (id_almacen) {
+        if (id_almacen) {
       queryText = `
         SELECT vp.id_variante_producto, vp.id_producto, vp.sku, vp.precio_lista::float AS precio_lista,
                vp.costo::float AS costo, vp.codigo_barras, vp.atributos_json, vp.activo,
                COALESCE((SELECT stock FROM public.inventario WHERE id_variante_producto = vp.id_variante_producto AND id_almacen = $2), 0)::int AS stock_actual
         FROM public.variante_producto vp
-        WHERE vp.id_producto = $1
+        WHERE vp.id_producto = $1 AND vp.eliminado = false
         ORDER BY vp.id_variante_producto
       `;
       queryParams = [id, id_almacen];
@@ -35,7 +35,7 @@ router.get('/products/:id/variants', requireAuth, requireRole('admin', 'manager'
                vp.costo::float AS costo, vp.codigo_barras, vp.atributos_json, vp.activo,
                COALESCE((SELECT SUM(stock) FROM public.inventario WHERE id_variante_producto = vp.id_variante_producto), 0)::int AS stock_actual
         FROM public.variante_producto vp
-        WHERE vp.id_producto = $1
+        WHERE vp.id_producto = $1 AND vp.eliminado = false
         ORDER BY vp.id_variante_producto
       `;
       queryParams = [id];
@@ -122,7 +122,7 @@ router.patch('/variants/:id', requireAuth, requireRole('admin', 'manager'), asyn
     const { rows: prevRows } = await client.query(`
       SELECT id_variante_producto, sku, precio_lista::float AS precio_lista, costo::float AS costo,
              codigo_barras, atributos_json, activo
-      FROM public.variante_producto WHERE id_variante_producto=$1
+      FROM public.variante_producto WHERE id_variante_producto=$1 AND eliminado=false
     `, [id]);
     if (!prevRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'No encontrada' }); }
     const prev = prevRows[0];
@@ -191,13 +191,13 @@ router.delete('/variants/:id', requireAuth, requireRole('admin', 'manager'), asy
     }
 
     const { rowCount } = await client.query(`
-      UPDATE public.variante_producto SET activo=false WHERE id_variante_producto=$1
+      UPDATE public.variante_producto SET eliminado=true, activo=false WHERE id_variante_producto=$1 AND eliminado=false
     `, [id]);
     if (!rowCount) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'No encontrada' }); }
 
     await client.query(`
       INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
-      VALUES ($1, 'variante_producto', 'VARIANT_DISABLE', $2::jsonb, NOW())
+      VALUES ($1, 'variante_producto', 'VARIANT_DELETE', $2::jsonb, NOW())
     `, [req.user.id || req.user.sub, JSON.stringify({ id_variante_producto: id })]);
 
     await client.query('COMMIT');

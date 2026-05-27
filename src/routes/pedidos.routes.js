@@ -325,7 +325,8 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       id_cuenta,
       moneda_pago,
       tasa_cambio,
-      monto_pago_real
+      monto_pago_real,
+      pagos
     } = req.body || {};
 
     // 1. Validaciones básicas
@@ -335,14 +336,40 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     if (!cliente_cedula || !cliente_nombre) {
       return res.status(400).json({ status: 'error', message: 'cliente_cedula y cliente_nombre son requeridos' });
     }
-    if (!id_cuenta) {
-      return res.status(400).json({ status: 'error', message: 'id_cuenta es requerido' });
-    }
 
-    const targetCuentaId = parseInt(id_cuenta, 10);
-    const rate = tasa_cambio ? parseFloat(tasa_cambio) : 1.0;
-    const payReal = monto_pago_real ? parseFloat(monto_pago_real) : 0.0;
-    const payCurrency = moneda_pago || 'USD';
+    // Normalizar la lista de pagos
+    let paymentsList = [];
+    if (Array.isArray(pagos) && pagos.length > 0) {
+      paymentsList = pagos.map((p, idx) => {
+        if (!p.id_cuenta) {
+          const err = new Error(`El pago en el índice ${idx} no tiene id_cuenta`);
+          err.status = 400;
+          throw err;
+        }
+        return {
+          id_cuenta: parseInt(p.id_cuenta, 10),
+          moneda_pago: p.moneda_pago || 'USD',
+          tasa_cambio: p.tasa_cambio ? parseFloat(p.tasa_cambio) : 1.0,
+          monto_real: p.monto_real ? parseFloat(p.monto_real) : 0.0,
+          monto_usd: p.monto_usd ? parseFloat(p.monto_usd) : 0.0,
+          metodo: p.metodo || 'Efectivo',
+          referencia: p.referencia || ''
+        };
+      });
+    } else {
+      if (!id_cuenta) {
+        return res.status(400).json({ status: 'error', message: 'id_cuenta o pagos es requerido' });
+      }
+      paymentsList = [{
+        id_cuenta: parseInt(id_cuenta, 10),
+        moneda_pago: moneda_pago || 'USD',
+        tasa_cambio: tasa_cambio ? parseFloat(tasa_cambio) : 1.0,
+        monto_real: monto_pago_real ? parseFloat(monto_pago_real) : 0.0,
+        monto_usd: 0.0, // Se calculará después de saber el total de la venta
+        metodo: req.body.metodo || 'Efectivo',
+        referencia: req.body.referencia || ''
+      }];
+    }
 
     // Resolver sucursal y usuario
     const idUsuario = req.user.id || req.user.sub;
@@ -398,25 +425,32 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       telefono: cliente_telefono || null
     });
 
-    // 3. Obtener y bloquear la cuenta de dinero para sumar el saldo
+    // 3. Obtener y bloquear todas las cuentas de dinero involucradas para sumar el saldo
+    const uniqueCuentaIds = [...new Set(paymentsList.map(p => p.id_cuenta))].sort((a, b) => a - b);
     const { rows: cRows } = await client.query(
       `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado 
        FROM public.cuenta 
-       WHERE id_cuenta = $1 AND eliminado = false 
+       WHERE id_cuenta = ANY($1::int[]) AND eliminado = false 
        FOR UPDATE`,
-      [targetCuentaId]
+      [uniqueCuentaIds]
     );
-    if (!cRows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ status: 'error', message: 'Cuenta bancaria/caja no encontrada' });
-    }
-    const cuenta = cRows[0];
-    if (!cuenta.activo) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ status: 'error', message: 'La cuenta seleccionada está desactivada' });
+
+    const cuentaMap = new Map(cRows.map(c => [c.id_cuenta, c]));
+    for (const p of paymentsList) {
+      const cuenta = cuentaMap.get(p.id_cuenta);
+      if (!cuenta) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ status: 'error', message: `Cuenta bancaria/caja ID ${p.id_cuenta} no encontrada` });
+      }
+      if (!cuenta.activo) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ status: 'error', message: `La cuenta "${cuenta.nombre}" está desactivada` });
+      }
     }
 
     // 4. Crear el pedido
+    // Usamos el primer pago de la lista como resumen/fallback para las columnas de la tabla pedido
+    const firstPayment = paymentsList[0];
     const { rows: ped } = await client.query(
       `INSERT INTO public.pedido (
         cedula_cliente, cliente_nombre, cliente_email, cliente_telefono, 
@@ -432,10 +466,10 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
         nota || 'Venta POS',
         idAlmacen,
         idUsuario,
-        targetCuentaId,
-        payCurrency,
-        rate,
-        payReal
+        firstPayment.id_cuenta,
+        firstPayment.moneda_pago,
+        firstPayment.tasa_cambio,
+        firstPayment.monto_real
       ]
     );
     const id_pedido = ped[0].id_pedido;
@@ -477,28 +511,62 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       [id_pedido, total]
     );
 
-    // 6. Registrar la transacción de caja (ingreso)
-    const { rows: tRows } = await client.query(
-      `INSERT INTO public.transaccion_caja (id_cuenta, tipo, monto_usd, tasa_cambio, monto_real, concepto, id_pedido, id_usuario)
-       VALUES ($1, 'ingreso', $2, $3, $4, $5, $6, $7)
-       RETURNING id_transaccion`,
-      [
-        targetCuentaId,
-        total, // monto_usd
-        rate,
-        payReal, // monto_real (en la moneda de pago)
-        `Venta POS Pedido #${id_pedido}`,
-        id_pedido,
-        idUsuario
-      ]
-    );
+    // Ajustar y validar montos de pago
+    if (!pagos || pagos.length === 0) {
+      // Caso fallback: un solo pago cubre todo
+      paymentsList[0].monto_usd = total;
+      if (!paymentsList[0].monto_real) {
+        paymentsList[0].monto_real = +(total * paymentsList[0].tasa_cambio).toFixed(2);
+      }
+      // Actualizar el pedido con el monto_pago_real calculado
+      await client.query(
+        `UPDATE public.pedido SET monto_pago_real = $2 WHERE id_pedido = $1`,
+        [id_pedido, paymentsList[0].monto_real]
+      );
+    } else {
+      // Caso pagos divididos: validar que la suma coincida con el total
+      const totalPagadoUsd = paymentsList.reduce((sum, p) => sum + p.monto_usd, 0);
+      if (Math.abs(totalPagadoUsd - total) >= 0.01) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          status: 'error',
+          message: `El monto total pagado ($${totalPagadoUsd.toFixed(2)}) no coincide con el total de la venta ($${total.toFixed(2)})`
+        });
+      }
+    }
 
-    // 7. Sumar el monto pagado al saldo de la cuenta de dinero
-    const nuevoSaldo = +(cuenta.saldo + payReal).toFixed(2);
-    await client.query(
-      `UPDATE public.cuenta SET saldo = $2, updated_at = NOW() WHERE id_cuenta = $1`,
-      [targetCuentaId, nuevoSaldo]
-    );
+    // 6 & 7. Registrar transacciones de caja y actualizar saldos de cuenta
+    for (const p of paymentsList) {
+      const cuenta = cuentaMap.get(p.id_cuenta);
+      const refText = p.referencia ? ` (Ref: ${p.referencia})` : '';
+      const metodoText = p.metodo ? ` - ${p.metodo}` : '';
+      const concepto = `Venta POS Pedido #${id_pedido}${metodoText}${refText}`;
+
+      // Insertar transacción de caja
+      await client.query(
+        `INSERT INTO public.transaccion_caja (id_cuenta, tipo, monto_usd, tasa_cambio, monto_real, concepto, id_pedido, id_usuario)
+         VALUES ($1, 'ingreso', $2, $3, $4, $5, $6, $7)`,
+        [
+          p.id_cuenta,
+          p.monto_usd,
+          p.tasa_cambio,
+          p.monto_real,
+          concepto,
+          id_pedido,
+          idUsuario
+        ]
+      );
+
+      // Sumar al saldo de la cuenta
+      const nuevoSaldo = +(cuenta.saldo + p.monto_real).toFixed(2);
+      await client.query(
+        `UPDATE public.cuenta SET saldo = $2, updated_at = NOW() WHERE id_cuenta = $1`,
+        [p.id_cuenta, nuevoSaldo]
+      );
+
+      // Actualizar el saldo local por si se usa la misma cuenta más de una vez en el mismo pedido
+      cuenta.saldo = nuevoSaldo;
+    }
 
     // 8. Registrar auditoría general de creación del pedido
     await client.query(
@@ -512,10 +580,7 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
           cliente_nombre,
           total,
           items: normItems,
-          id_cuenta: targetCuentaId,
-          moneda_pago: payCurrency,
-          tasa_cambio: rate,
-          monto_pago_real: payReal,
+          pagos: paymentsList,
           id_almacen: idAlmacen
         })
       ]
@@ -644,7 +709,19 @@ router.get('/pedidos/:id', requireAuth, requireRole('admin', 'manager', 'vendedo
       [id]
     );
 
-    res.json({ ...head[0], items });
+    const { rows: transacciones } = await pool.query(
+      `
+      SELECT t.id_transaccion, t.id_cuenta, c.nombre AS cuenta_nombre, c.moneda AS cuenta_moneda,
+             t.tipo, t.monto_usd::float AS monto_usd, t.tasa_cambio::float AS tasa_cambio, 
+             t.monto_real::float AS monto_real, t.concepto
+      FROM public.transaccion_caja t
+      JOIN public.cuenta c ON c.id_cuenta = t.id_cuenta
+      WHERE t.id_pedido = $1
+      `,
+      [id]
+    );
+
+    res.json({ ...head[0], items, transacciones });
   } catch (err) { next(err); }
 });
 

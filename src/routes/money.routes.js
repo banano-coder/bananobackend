@@ -10,6 +10,7 @@ function toInt(v, def) { const n = parseInt(v, 10); return Number.isFinite(n) ? 
 // LISTAR movimientos de caja
 router.get('/money/movimientos', requireAuth, async (req, res, next) => {
   try {
+    const id_almacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
     const id_cuenta = req.query.id_cuenta ? parseInt(req.query.id_cuenta, 10) : null;
     const tipo = (req.query.tipo || '').trim();
     const from = (req.query.from || '').trim();
@@ -24,6 +25,7 @@ router.get('/money/movimientos', requireAuth, async (req, res, next) => {
     let i = 1;
 
     if (id_cuenta) { conds.push(`t.id_cuenta = $${i++}`); params.push(id_cuenta); }
+    if (id_almacen) { conds.push(`c.id_almacen = $${i++}`); params.push(id_almacen); }
     if (tipo) { conds.push(`t.tipo = $${i++}`); params.push(tipo); }
     if (from) { conds.push(`t.created_at >= $${i++}::timestamptz`); params.push(from); }
     if (to) { conds.push(`t.created_at < ($${i++}::timestamptz + INTERVAL '1 day')`); params.push(to); }
@@ -34,7 +36,10 @@ router.get('/money/movimientos', requireAuth, async (req, res, next) => {
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
     const { rows: countRows } = await pool.query(
-      `SELECT COUNT(*)::int AS total FROM public.transaccion_caja t ${where}`, 
+      `SELECT COUNT(*)::int AS total 
+       FROM public.transaccion_caja t 
+       JOIN public.cuenta c ON c.id_cuenta = t.id_cuenta
+       ${where}`, 
       params
     );
     const total = countRows[0]?.total || 0;
@@ -175,18 +180,35 @@ router.post('/money/movimientos', requireAuth, requireRole('admin', 'manager'), 
 // RESUMEN de saldos por moneda
 router.get('/money/resumen', requireAuth, async (req, res, next) => {
   try {
-    const { rows: balances } = await pool.query(
-      `SELECT moneda, SUM(saldo)::float AS total 
-       FROM public.cuenta 
-       WHERE eliminado = false AND activo = true
-       GROUP BY moneda`
-    );
+    const id_almacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
+    
+    let balancesQuery = `
+      SELECT moneda, SUM(saldo)::float AS total 
+      FROM public.cuenta 
+      WHERE eliminado = false AND activo = true
+    `;
+    const balanceParams = [];
+    if (id_almacen) {
+      balancesQuery += ` AND id_almacen = $1`;
+      balanceParams.push(id_almacen);
+    }
+    balancesQuery += ` GROUP BY moneda`;
 
-    const { rows: counts } = await pool.query(
-      `SELECT tipo, COUNT(*)::int AS cantidad, COALESCE(SUM(monto_usd)::float, 0) AS total_usd
-       FROM public.transaccion_caja
-       GROUP BY tipo`
-    );
+    const { rows: balances } = await pool.query(balancesQuery, balanceParams);
+
+    let countsQuery = `
+      SELECT t.tipo, COUNT(*)::int AS cantidad, COALESCE(SUM(t.monto_usd)::float, 0) AS total_usd
+      FROM public.transaccion_caja t
+      JOIN public.cuenta c ON c.id_cuenta = t.id_cuenta
+    `;
+    const countsParams = [];
+    if (id_almacen) {
+      countsQuery += ` WHERE c.id_almacen = $1`;
+      countsParams.push(id_almacen);
+    }
+    countsQuery += ` GROUP BY t.tipo`;
+
+    const { rows: counts } = await pool.query(countsQuery, countsParams);
 
     res.json({
       saldos: balances,
