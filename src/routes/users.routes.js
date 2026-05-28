@@ -349,7 +349,8 @@ router.delete('/users/:id', requireAuth, requireRole('admin'), async (req, res, 
     const { rowCount } = await client.query(
       `UPDATE public.usuario 
        SET activo = false, 
-           eliminado = true
+           eliminado = true,
+           email = email || '_deleted_' || id_usuario
        WHERE id_usuario = $1 AND eliminado = false`,
       [targetId]
     );

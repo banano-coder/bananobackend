@@ -19,7 +19,8 @@ async function aplicarMovimiento({
   motivo,
   refExterna,
   costoUnitario,
-  actorId
+  actorId,
+  skipAudit = false
 }) {
   const finalAlmacenId = parseInt(idAlmacen, 10) || 1;
 
@@ -103,26 +104,28 @@ async function aplicarMovimiento({
   const mov = movRows[0];
 
   // auditoría con before/after
-  await client.query(
-    `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
-     VALUES ($1, 'inventario', $2, $3::jsonb, NOW())`,
-    [
-      actorId || null,
-      t === 'entrada' ? 'INV_ENTRADA' : (t === 'salida' ? 'INV_SALIDA' : 'INV_AJUSTE'),
-      JSON.stringify({
-        id_movimiento_inventario: mov.id_movimiento_inventario,
-        id_variante_producto: idVariante,
-        id_almacen: finalAlmacenId,
-        tipo: t,
-        cantidad: cant,
-        motivo: motivo || null,
-        ref_externa: refExterna || null,
-        costo_unitario: costo,
-        stock_antes: stockActual,
-        stock_despues: stockNuevo
-      })
-    ]
-  );
+  if (!skipAudit) {
+    await client.query(
+      `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
+       VALUES ($1, 'inventario', $2, $3::jsonb, NOW())`,
+      [
+        actorId || null,
+        t === 'entrada' ? 'INV_ENTRADA' : (t === 'salida' ? 'INV_SALIDA' : 'INV_AJUSTE'),
+        JSON.stringify({
+          id_movimiento_inventario: mov.id_movimiento_inventario,
+          id_variante_producto: idVariante,
+          id_almacen: finalAlmacenId,
+          tipo: t,
+          cantidad: cant,
+          motivo: motivo || null,
+          ref_externa: refExterna || null,
+          costo_unitario: costo,
+          stock_antes: stockActual,
+          stock_despues: stockNuevo
+        })
+      ]
+    );
+  }
 
   return { idMovimiento: mov.id_movimiento_inventario, stockAntes: stockActual, stockDespues: stockNuevo };
 }
@@ -345,9 +348,10 @@ router.post('/inventario/movimientos/lote', requireAuth, requireRole('admin', 'm
         return res.status(400).json({ message: `Cantidad inválida para variante ${idVar}: ${item.cantidad}` });
       }
 
-      // Validate variant is active
+      // Validate variant is active and get details
       const { rows: vr } = await client.query(
-        `SELECT vp.id_variante_producto, vp.activo, p.activo AS prod_activo
+        `SELECT vp.id_variante_producto, vp.activo, vp.sku, vp.atributos_json,
+                p.nombre AS producto_nombre, p.activo AS prod_activo
            FROM public.variante_producto vp
            JOIN public.producto p ON p.id_producto = vp.id_producto
           WHERE vp.id_variante_producto = $1`,
@@ -371,17 +375,45 @@ router.post('/inventario/movimientos/lote', requireAuth, requireRole('admin', 'm
         motivo: item.motivo || motivoGlobal || 'Ingreso por lote',
         refExterna: item.ref_externa || refGlobal || null,
         costoUnitario: item.costo_unitario ?? null,
-        actorId
+        actorId,
+        skipAudit: true
       });
 
       results.push({
         id_variante_producto: idVar,
+        producto: vr[0].producto_nombre,
+        sku: vr[0].sku,
+        variante: vr[0].atributos_json,
         cantidad: cant,
         stock_antes: result.stockAntes,
         stock_despues: result.stockDespues,
         id_movimiento_inventario: result.idMovimiento
       });
     }
+
+    // Fetch warehouse name
+    const { rows: whRows } = await client.query(
+      `SELECT nombre FROM public.almacen WHERE id_almacen = $1`,
+      [idAlm]
+    );
+    const almacenNombre = whRows[0]?.nombre || `Almacén #${idAlm}`;
+
+    // Insert single grouped audit log
+    await client.query(
+      `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
+       VALUES ($1, 'inventario', 'INV_ENTRADA_LOTE', $2::jsonb, NOW())`,
+      [
+        actorId || null,
+        JSON.stringify({
+          id_almacen: idAlm,
+          almacen_nombre: almacenNombre,
+          motivo: motivoGlobal || 'Ingreso por lote',
+          ref_externa: refGlobal || null,
+          total_items: results.length,
+          items: results
+        })
+      ]
+    );
 
     await client.query('COMMIT');
     res.status(201).json({

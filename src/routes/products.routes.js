@@ -7,7 +7,7 @@ const router = Router();
 // LISTAR con categoría/marca, stock agregado, filtrado y paginación
 router.get('/products', async (req, res, next) => {
   try {
-    const { search, id_categoria, id_marca, status, id_almacen } = req.query;
+    const { search, id_categoria, id_marca, status, id_almacen, stock_status } = req.query;
     const page = Math.max(1, parseInt(req.query.page || '1', 10));
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
     const offset = (page - 1) * limit;
@@ -15,6 +15,14 @@ router.get('/products', async (req, res, next) => {
     const conds = ['p.eliminado = false'];
     const params = [];
     let paramIndex = 1;
+
+    const idAlmacen = id_almacen ? parseInt(id_almacen, 10) : null;
+    let idAlmacenParamIndex = null;
+    if (idAlmacen) {
+      params.push(idAlmacen);
+      idAlmacenParamIndex = paramIndex;
+      paramIndex++;
+    }
 
     if (search) {
       conds.push(`(p.nombre ILIKE $${paramIndex} OR c.nombre ILIKE $${paramIndex} OR m.nombre ILIKE $${paramIndex} OR EXISTS (SELECT 1 FROM public.variante_producto vp2 WHERE vp2.id_producto = p.id_producto AND (vp2.sku ILIKE $${paramIndex} OR vp2.codigo_barras ILIKE $${paramIndex})))`);
@@ -42,6 +50,40 @@ router.get('/products', async (req, res, next) => {
       conds.push(`p.necesita_revision = true`);
     }
 
+    if (stock_status === 'positivo') {
+      if (idAlmacen) {
+        conds.push(`(
+          SELECT COALESCE(SUM(inv2.stock), 0)::int
+          FROM public.variante_producto vp2
+          LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
+          WHERE vp2.id_producto = p.id_producto AND inv2.id_almacen = $${idAlmacenParamIndex}
+        ) > 0`);
+      } else {
+        conds.push(`(
+          SELECT COALESCE(SUM(inv2.stock), 0)::int
+          FROM public.variante_producto vp2
+          LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
+          WHERE vp2.id_producto = p.id_producto
+        ) > 0`);
+      }
+    } else if (stock_status === 'cero') {
+      if (idAlmacen) {
+        conds.push(`(
+          SELECT COALESCE(SUM(inv2.stock), 0)::int
+          FROM public.variante_producto vp2
+          LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
+          WHERE vp2.id_producto = p.id_producto AND inv2.id_almacen = $${idAlmacenParamIndex}
+        ) = 0`);
+      } else {
+        conds.push(`(
+          SELECT COALESCE(SUM(inv2.stock), 0)::int
+          FROM public.variante_producto vp2
+          LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
+          WHERE vp2.id_producto = p.id_producto
+        ) = 0`);
+      }
+    }
+
     const whereClause = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
     // Conteo total para paginación
@@ -56,17 +98,9 @@ router.get('/products', async (req, res, next) => {
     const total = countRows[0]?.total || 0;
 
     // Consulta de registros con límite y offset, soportando id_almacen
-    const idAlmacen = id_almacen ? parseInt(id_almacen, 10) : null;
     const mainParams = [...params];
-    let mainParamIndex = paramIndex;
-
-    if (idAlmacen) {
-      mainParams.push(idAlmacen);
-      mainParamIndex++;
-    }
-
-    const limitIndex = mainParamIndex;
-    const offsetIndex = mainParamIndex + 1;
+    const limitIndex = paramIndex;
+    const offsetIndex = paramIndex + 1;
     mainParams.push(limit, offset);
 
     let query = `
@@ -90,7 +124,7 @@ router.get('/products', async (req, res, next) => {
       LEFT JOIN public.marca m     ON m.id_marca     = p.id_marca
       LEFT JOIN public.variante_producto vp ON vp.id_producto = p.id_producto
       LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp.id_variante_producto
-        ${idAlmacen ? `AND inv.id_almacen = $${paramIndex}` : ''}
+        ${idAlmacen ? `AND inv.id_almacen = $${idAlmacenParamIndex}` : ''}
       ${whereClause}
       GROUP BY p.id_producto, c.nombre, m.nombre, p.necesita_revision
       ORDER BY p.fecha_creacion DESC

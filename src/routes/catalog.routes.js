@@ -91,34 +91,88 @@ router.get('/catalog/products', async (req, res, next) => {
     const orderBy = SORT_MAP[sortParam] || SORT_MAP.created_at;
     const dir = (req.query.dir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
-    // Filtro de búsqueda
-    const searchSql = q ? `AND (p.nombre ILIKE $1 OR p.sku_base ILIKE $1 OR EXISTS (SELECT 1 FROM public.variante_producto vp3 WHERE vp3.id_producto = p.id_producto AND (vp3.sku ILIKE $1 OR vp3.codigo_barras ILIKE $1)))` : '';
+    // Construcción dinámica de condiciones SQL
+    const conds = ['p.activo = true', 'p.eliminado = false'];
+    const params = [];
+    let paramIndex = 1;
 
-    // Filtro de stock (calculado como suma de stock de variantes)
-    const stockFilterSql = ocultarSinStock
-      ? `AND (SELECT SUM(COALESCE(inv.stock, 0)) 
-                FROM public.variante_producto vp2 
-                LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp2.id_variante_producto 
-                WHERE vp2.id_producto = p.id_producto AND vp2.activo = true) > 0`
-      : '';
+    // Búsqueda por texto (q)
+    if (q) {
+      conds.push(`(p.nombre ILIKE $${paramIndex} OR p.sku_base ILIKE $${paramIndex} OR EXISTS (SELECT 1 FROM public.variante_producto vp3 WHERE vp3.id_producto = p.id_producto AND (vp3.sku ILIKE $${paramIndex} OR vp3.codigo_barras ILIKE $${paramIndex})))`);
+      params.push(`%${q}%`);
+      paramIndex++;
+    }
 
-    const paramsBase = q ? [`%${q}%`] : [];
+    // Filtrar por categoría
+    const category = (req.query.category || '').toString().trim();
+    if (category && category !== 'all') {
+      conds.push(`p.id_categoria = $${paramIndex}`);
+      params.push(parseInt(category, 10));
+      paramIndex++;
+    }
+
+    // Filtrar por marca
+    const brand = (req.query.brand || '').toString().trim();
+    if (brand && brand !== 'all') {
+      conds.push(`p.id_marca = $${paramIndex}`);
+      params.push(parseInt(brand, 10));
+      paramIndex++;
+    }
+
+    // Filtrar por precio mínimo / máximo (basado en precio_lista de variantes)
+    const minVal = parseFloat(req.query.min);
+    const maxVal = parseFloat(req.query.max);
+    const hasMin = Number.isFinite(minVal);
+    const hasMax = Number.isFinite(maxVal);
+    if (hasMin || hasMax) {
+      let priceCond = '';
+      if (hasMin && hasMax) {
+        priceCond = `vp2.precio_lista >= $${paramIndex} AND vp2.precio_lista <= $${paramIndex + 1}`;
+        params.push(minVal, maxVal);
+        paramIndex += 2;
+      } else if (hasMin) {
+        priceCond = `vp2.precio_lista >= $${paramIndex}`;
+        params.push(minVal);
+        paramIndex++;
+      } else if (hasMax) {
+        priceCond = `vp2.precio_lista <= $${paramIndex}`;
+        params.push(maxVal);
+        paramIndex++;
+      }
+      conds.push(`EXISTS (
+        SELECT 1 FROM public.variante_producto vp2
+        WHERE vp2.id_producto = p.id_producto
+          AND vp2.activo = true
+          AND ${priceCond}
+      )`);
+    }
+
+    // Filtro de ocultar sin stock
+    if (ocultarSinStock) {
+      conds.push(`(SELECT SUM(COALESCE(inv.stock, 0)) 
+                   FROM public.variante_producto vp2 
+                   LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp2.id_variante_producto 
+                   WHERE vp2.id_producto = p.id_producto AND vp2.activo = true) > 0`);
+    }
+
+    const whereSql = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
 
     // Total
     const { rows: tot } = await pool.query(
       `
       SELECT COUNT(*)::int AS total
       FROM public.producto p
-      WHERE p.activo = true AND p.eliminado = false
-      ${searchSql}
-      ${stockFilterSql}
+      ${whereSql}
       `,
-      paramsBase
+      params
     );
     const total = tot[0]?.total || 0;
 
-    // Datos con precio mínimo de variantes
-    const paramsData = q ? [`%${q}%`, limit, offset] : [limit, offset];
+    // Datos de productos
+    const limitIndex = paramIndex;
+    const offsetIndex = paramIndex + 1;
+    const paramsData = [...params, limit, offset];
+
     const { rows: items } = await pool.query(
       `
       SELECT
@@ -128,21 +182,25 @@ router.get('/catalog/products', async (req, res, next) => {
         p.descripcion,
         p.fecha_creacion,
         p.id_categoria,
+        cat.nombre AS category_name,
         p.id_marca,
+        b.nombre AS brand_name,
         MIN(vp.precio_lista) AS min_price,
         COUNT(vp.precio_lista) FILTER (WHERE vp.activo = true) AS variantes_activas,
         (SELECT id_variante_producto FROM public.variante_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY id_variante_producto ASC LIMIT 1) AS default_variant_id,
         (SELECT url FROM public.imagen_producto WHERE id_producto = p.id_producto AND activo = true ORDER BY es_principal DESC, id_imagen_producto ASC LIMIT 1) AS imagen_principal
       FROM public.producto p
+      LEFT JOIN public.categoria cat
+        ON cat.id_categoria = p.id_categoria
+      LEFT JOIN public.marca b
+        ON b.id_marca = p.id_marca
       LEFT JOIN public.variante_producto vp
         ON vp.id_producto = p.id_producto
        AND vp.activo = true
-      WHERE p.activo = true AND p.eliminado = false
-      ${searchSql}
-      ${stockFilterSql}
-      GROUP BY p.id_producto
+      ${whereSql}
+      GROUP BY p.id_producto, cat.nombre, b.nombre
       ORDER BY ${orderBy} ${dir}
-      LIMIT $${q ? 2 : 1} OFFSET $${q ? 3 : 2}
+      LIMIT $${limitIndex} OFFSET $${offsetIndex}
       `,
       paramsData
     );
