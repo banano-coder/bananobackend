@@ -129,7 +129,7 @@ function formatDetail(action, payload) {
  * - ticket_promedio (monto_total_estimado / concretados)
  */
 router.get('/reports/pedidos/kpis',
-  requireAuth, requireRole('admin', 'manager'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
   async (req, res, next) => {
     try {
       const from = parseDate(req.query.from);
@@ -179,7 +179,7 @@ router.get('/reports/pedidos/kpis',
  * Devuelve: fecha (inicio), total, concretados, monto_concretado
  */
 router.get('/reports/pedidos/serie',
-  requireAuth, requireRole('admin', 'manager'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
   async (req, res, next) => {
     try {
       const from = parseDate(req.query.from);
@@ -227,7 +227,7 @@ router.get('/reports/pedidos/serie',
  * Agrupa por producto/variante y ordena por cantidad total salida.
  */
 router.get('/reports/inventario/top-salidas',
-  requireAuth, requireRole('admin', 'manager'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
   async (req, res, next) => {
     try {
       const from = parseDate(req.query.from);
@@ -273,7 +273,7 @@ router.get('/reports/inventario/top-salidas',
  * Cuenta y suma cantidades de salidas.
  */
 router.get('/reports/inventario/salidas-serie',
-  requireAuth, requireRole('admin', 'manager'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
   async (req, res, next) => {
     try {
       const from = parseDate(req.query.from);
@@ -321,7 +321,7 @@ router.get('/reports/inventario/salidas-serie',
  * - Filtra variantes y productos activos con stock <= threshold.
  */
 router.get('/reports/alertas/stock-bajo',
-  requireAuth, requireRole('admin', 'manager', 'vendedor'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
   async (req, res, next) => {
     try {
       const threshold = toInt(req.query.threshold, 5);
@@ -388,7 +388,7 @@ router.get('/reports/alertas/stock-bajo',
  * Filtra solo productos y variantes activas.
  */
 router.get('/reports/inventario/stock-actual',
-  requireAuth, requireRole('admin', 'manager'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
   async (req, res, next) => {
     try {
       const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
@@ -402,13 +402,20 @@ router.get('/reports/inventario/stock-actual',
             p.nombre AS producto,
             v.id_variante_producto,
             v.sku,
+            v.atributos_json AS variante,
+            v.codigo_barras,
             COALESCE(i.stock,0)::int AS stock,
-            i.id_almacen,
-            alm.nombre AS almacen_nombre
+            COALESCE(v.costo,0)::numeric AS costo,
+            COALESCE(v.precio_lista,0)::numeric AS precio,
+            cat.nombre AS categoria,
+            b.nombre AS marca,
+            alm.nombre AS almacen
           FROM public.producto p
-          LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto
+          LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto AND (v.eliminado IS NULL OR v.eliminado = false)
           LEFT JOIN public.inventario i        ON i.id_variante_producto = v.id_variante_producto AND i.id_almacen = $1
           LEFT JOIN public.almacen alm         ON alm.id_almacen = i.id_almacen
+          LEFT JOIN public.categoria cat       ON cat.id_categoria = p.id_categoria
+          LEFT JOIN public.marca b             ON b.id_marca = p.id_marca
           WHERE p.activo = true
             AND (v.id_variante_producto IS NULL OR v.activo = true)
           ORDER BY p.nombre, v.sku
@@ -421,13 +428,22 @@ router.get('/reports/inventario/stock-actual',
             p.nombre AS producto,
             v.id_variante_producto,
             v.sku,
-            COALESCE(SUM(i.stock),0)::int AS stock
+            v.atributos_json AS variante,
+            v.codigo_barras,
+            COALESCE(SUM(i.stock),0)::int AS stock,
+            COALESCE(v.costo,0)::numeric AS costo,
+            COALESCE(v.precio_lista,0)::numeric AS precio,
+            cat.nombre AS categoria,
+            b.nombre AS marca,
+            NULL AS almacen
           FROM public.producto p
-          LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto
+          LEFT JOIN public.variante_producto v ON v.id_producto = p.id_producto AND (v.eliminado IS NULL OR v.eliminado = false)
           LEFT JOIN public.inventario i        ON i.id_variante_producto = v.id_variante_producto
+          LEFT JOIN public.categoria cat       ON cat.id_categoria = p.id_categoria
+          LEFT JOIN public.marca b             ON b.id_marca = p.id_marca
           WHERE p.activo = true
             AND (v.id_variante_producto IS NULL OR v.activo = true)
-          GROUP BY p.id_producto, p.nombre, v.id_variante_producto, v.sku
+          GROUP BY p.id_producto, p.nombre, v.id_variante_producto, v.sku, v.atributos_json, v.codigo_barras, v.costo, v.precio_lista, cat.nombre, b.nombre
           ORDER BY p.nombre, v.sku
         `;
       }
@@ -438,12 +454,13 @@ router.get('/reports/inventario/stock-actual',
   }
 );
 
+
 /**
  * 7) KPIs de Despachos (Salidas de inventario)
  * GET /api/reports/movimientos/kpis?from=&to=
  */
 router.get('/reports/movimientos/kpis',
-  requireAuth, requireRole('admin', 'manager'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
   async (req, res, next) => {
     try {
       const from = parseDate(req.query.from);
@@ -481,7 +498,7 @@ router.get('/reports/movimientos/kpis',
  * GET /api/reports/movimientos/detalle?from=&to=
  */
 router.get('/reports/movimientos/detalle',
-  requireAuth, requireRole('admin', 'manager'),
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
   async (req, res, next) => {
     try {
       const from = parseDate(req.query.from);

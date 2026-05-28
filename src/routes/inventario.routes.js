@@ -301,4 +301,100 @@ router.get('/inventario/stock/:id', requireAuth, requireRole('admin', 'manager',
 });
 
 router.aplicarMovimiento = aplicarMovimiento;
+
+/**
+ * POST /api/inventario/movimientos/lote
+ * Body: {
+ *   id_almacen: number,
+ *   motivo?: string,       // motivo global (puede ser sobreescrito por ítem)
+ *   ref_externa?: string,  // referencia global
+ *   items: [{ id_variante_producto, cantidad, motivo?, ref_externa?, costo_unitario? }, ...]
+ * }
+ * Roles: admin, manager
+ * Procesa todas las entradas en una sola transacción atómica.
+ */
+router.post('/inventario/movimientos/lote', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { id_almacen, motivo: motivoGlobal, ref_externa: refGlobal, items } = req.body || {};
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ message: 'Se requiere un arreglo "items" con al menos un elemento.' });
+    }
+
+    const idAlm = parseInt(id_almacen, 10);
+    if (!Number.isInteger(idAlm) || idAlm <= 0) {
+      return res.status(400).json({ message: 'id_almacen inválido.' });
+    }
+
+    const actorId = req.user.id || req.user.sub;
+
+    await client.query('BEGIN');
+
+    const results = [];
+    for (const item of items) {
+      const idVar = parseInt(item.id_variante_producto, 10);
+      const cant = parseInt(item.cantidad, 10);
+
+      if (!Number.isInteger(idVar) || idVar <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: `id_variante_producto inválido: ${item.id_variante_producto}` });
+      }
+      if (!Number.isInteger(cant) || cant <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: `Cantidad inválida para variante ${idVar}: ${item.cantidad}` });
+      }
+
+      // Validate variant is active
+      const { rows: vr } = await client.query(
+        `SELECT vp.id_variante_producto, vp.activo, p.activo AS prod_activo
+           FROM public.variante_producto vp
+           JOIN public.producto p ON p.id_producto = vp.id_producto
+          WHERE vp.id_variante_producto = $1`,
+        [idVar]
+      );
+      if (!vr.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ message: `Variante ${idVar} no existe.` });
+      }
+      if (vr[0].activo === false || vr[0].prod_activo === false) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: `Variante ${idVar} o su producto están inactivos.` });
+      }
+
+      const result = await aplicarMovimiento({
+        client,
+        idVariante: idVar,
+        idAlmacen: idAlm,
+        tipo: 'entrada',
+        cantidad: cant,
+        motivo: item.motivo || motivoGlobal || 'Ingreso por lote',
+        refExterna: item.ref_externa || refGlobal || null,
+        costoUnitario: item.costo_unitario ?? null,
+        actorId
+      });
+
+      results.push({
+        id_variante_producto: idVar,
+        cantidad: cant,
+        stock_antes: result.stockAntes,
+        stock_despues: result.stockDespues,
+        id_movimiento_inventario: result.idMovimiento
+      });
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      message: `Lote procesado: ${results.length} entradas registradas.`,
+      total_procesados: results.length,
+      resultados: results
+    });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { }
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    next(err);
+  } finally { client.release(); }
+});
+
 module.exports = router;
+
