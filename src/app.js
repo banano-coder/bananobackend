@@ -23,6 +23,7 @@ const bulkRoutes = require('./routes/bulk.routes');
 const almacenesRoutes = require('./routes/almacenes.routes');
 const cuentasRoutes = require('./routes/cuentas.routes');
 const moneyRoutes = require('./routes/money.routes');
+const expensesRoutes = require('./routes/expenses.routes');
 const { notFound, errorHandler } = require('./middlewares/error.middleware');
 
 const app = express();
@@ -57,6 +58,7 @@ app.use('/api', bulkRoutes);
 app.use('/api', almacenesRoutes);
 app.use('/api', cuentasRoutes);
 app.use('/api', moneyRoutes);
+app.use('/api', expensesRoutes);
 
 // 404 & errores
 app.use(notFound);

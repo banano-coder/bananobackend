@@ -714,5 +714,153 @@ a.id,
   }
 );
 
+/**
+ * 8.5) Resumen Semanal de Ventas (Mes Actual)
+ * GET /api/reports/sales-weekly-summary
+ */
+router.get('/reports/sales-weekly-summary', requireAuth, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 
+         COALESCE(SUM(CASE WHEN EXTRACT(DAY FROM p.created_at) BETWEEN 1 AND 7 THEN p.total_estimado ELSE 0 END), 0)::float AS week1_total,
+         COUNT(CASE WHEN EXTRACT(DAY FROM p.created_at) BETWEEN 1 AND 7 THEN 1 END)::int AS week1_count,
+         
+         COALESCE(SUM(CASE WHEN EXTRACT(DAY FROM p.created_at) BETWEEN 8 AND 14 THEN p.total_estimado ELSE 0 END), 0)::float AS week2_total,
+         COUNT(CASE WHEN EXTRACT(DAY FROM p.created_at) BETWEEN 8 AND 14 THEN 1 END)::int AS week2_count,
+         
+         COALESCE(SUM(CASE WHEN EXTRACT(DAY FROM p.created_at) BETWEEN 15 AND 21 THEN p.total_estimado ELSE 0 END), 0)::float AS week3_total,
+         COUNT(CASE WHEN EXTRACT(DAY FROM p.created_at) BETWEEN 15 AND 21 THEN 1 END)::int AS week3_count,
+         
+         COALESCE(SUM(CASE WHEN EXTRACT(DAY FROM p.created_at) >= 22 THEN p.total_estimado ELSE 0 END), 0)::float AS week4_total,
+         COUNT(CASE WHEN EXTRACT(DAY FROM p.created_at) >= 22 THEN 1 END)::int AS week4_count
+       FROM public.pedido p
+       WHERE p.estado = 'concretado'
+         AND p.created_at >= DATE_TRUNC('month', CURRENT_DATE)
+         AND p.created_at < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'`
+    );
+
+    res.json({
+      summary: rows[0]
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * 9) Reporte de Ventas y Ganancias (Rentabilidad)
+ * GET /api/reports/sales-profit?from=&to=&id_almacen=
+ */
+router.get('/reports/sales-profit',
+  requireAuth, requireRole('admin', 'manager', 'vendedor', 'viewer'),
+  async (req, res, next) => {
+    try {
+      const from = parseDate(req.query.from);
+      const to = parseDate(req.query.to);
+      const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
+
+      // Por defecto, últimos 30 días si no se especifica
+      const defaultTo = new Date();
+      const defaultFrom = new Date();
+      defaultFrom.setDate(defaultFrom.getDate() - 30);
+
+      const startDate = from || defaultFrom.toISOString().split('T')[0];
+      const endDate = to || defaultTo.toISOString().split('T')[0];
+
+      // 1. Obtener KPIs (Ingresos, Costo, Ganancia Bruta, Gastos, Ganancia Neta)
+      const kpisPromise = pool.query(
+        `WITH sales_kpis AS (
+           SELECT 
+             COALESCE(SUM(p.total_estimado), 0)::float AS total_ingresos,
+             COALESCE(SUM(pi.cantidad * COALESCE(v.costo, 0)), 0)::float AS total_costo
+           FROM public.pedido p
+           JOIN public.pedido_item pi ON pi.id_pedido = p.id_pedido
+           LEFT JOIN public.variante_producto v ON v.id_variante_producto = pi.id_variante_producto
+           WHERE p.estado = 'concretado'
+             AND p.created_at >= $1::timestamptz
+             AND p.created_at < ($2::timestamptz + INTERVAL '1 day')
+             AND ($3::int IS NULL OR p.id_almacen = $3)
+         ),
+         expenses_kpis AS (
+           SELECT 
+             COALESCE(SUM(g.monto_usd), 0)::float AS total_gastos
+           FROM public.gasto g
+           WHERE g.eliminado = false
+             AND g.fecha_gasto >= $1::date
+             AND g.fecha_gasto <= $2::date
+             AND ($3::int IS NULL OR g.id_almacen = $3)
+         )
+         SELECT 
+           sk.total_ingresos,
+           sk.total_costo,
+           (sk.total_ingresos - sk.total_costo)::float AS ganancia_bruta,
+           ek.total_gastos,
+           ((sk.total_ingresos - sk.total_costo) - ek.total_gastos)::float AS ganancia_neta
+         FROM sales_kpis sk, expenses_kpis ek`,
+        [startDate, endDate, idAlmacen]
+      );
+
+      // 2. Obtener Listado Detallado de Ventas
+      const salesPromise = pool.query(
+        `SELECT 
+           p.id_pedido,
+           p.cliente_nombre,
+           p.created_at::text AS fecha,
+           p.origen,
+           p.total_estimado::float AS total_ingreso,
+           COALESCE(SUM(pi.cantidad * COALESCE(v.costo, 0)), 0)::float AS total_costo,
+           (p.total_estimado - COALESCE(SUM(pi.cantidad * COALESCE(v.costo, 0)), 0))::float AS ganancia,
+           p.moneda_pago,
+           p.monto_pago_real::float AS monto_pago_real,
+           alm.nombre AS almacen_nombre
+         FROM public.pedido p
+         JOIN public.pedido_item pi ON pi.id_pedido = p.id_pedido
+         LEFT JOIN public.variante_producto v ON v.id_variante_producto = pi.id_variante_producto
+         LEFT JOIN public.almacen alm ON alm.id_almacen = p.id_almacen
+         WHERE p.estado = 'concretado'
+           AND p.created_at >= $1::timestamptz
+           AND p.created_at < ($2::timestamptz + INTERVAL '1 day')
+           AND ($3::int IS NULL OR p.id_almacen = $3)
+         GROUP BY p.id_pedido, p.cliente_nombre, p.created_at, p.origen, p.total_estimado, p.moneda_pago, p.monto_pago_real, alm.nombre
+         ORDER BY p.created_at DESC`,
+        [startDate, endDate, idAlmacen]
+      );
+
+      // 3. Obtener Serie Temporal Diaria para Gráfico
+      const seriesPromise = pool.query(
+        `SELECT 
+           date_trunc('day', p.created_at) AS periodo,
+           COALESCE(SUM(p.total_estimado), 0)::float AS ingresos,
+           COALESCE(SUM(pi.cantidad * COALESCE(v.costo, 0)), 0)::float AS costos
+         FROM public.pedido p
+         JOIN public.pedido_item pi ON pi.id_pedido = p.id_pedido
+         LEFT JOIN public.variante_producto v ON v.id_variante_producto = pi.id_variante_producto
+         WHERE p.estado = 'concretado'
+           AND p.created_at >= $1::timestamptz
+           AND p.created_at < ($2::timestamptz + INTERVAL '1 day')
+           AND ($3::int IS NULL OR p.id_almacen = $3)
+         GROUP BY 1
+         ORDER BY 1`,
+        [startDate, endDate, idAlmacen]
+      );
+
+      const [kpisRes, salesRes, seriesRes] = await Promise.all([kpisPromise, salesPromise, seriesPromise]);
+
+      res.json({
+        kpis: kpisRes.rows[0] || { total_ingresos: 0, total_costo: 0, ganancia_bruta: 0, total_gastos: 0, ganancia_neta: 0 },
+        sales: salesRes.rows,
+        series: seriesRes.rows.map(r => ({
+          periodo: r.periodo ? r.periodo.toISOString() : null,
+          ingresos: r.ingresos,
+          costos: r.costos
+        }))
+      });
+
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 module.exports = router;
 

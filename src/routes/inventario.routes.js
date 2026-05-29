@@ -153,8 +153,8 @@ router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
 
     // autorización por tipo
     const roles = req.user?.roles || [];
-    const canEntrada = roles.some(r => r === 'admin' || r === 'manager');
-    const canSalida = roles.some(r => r === 'admin' || r === 'manager' || r === 'vendedor');
+    const canEntrada = roles.some(r => r === 'admin' || r === 'manager' || r === 'vendedor');
+    const canSalida = roles.some(r => r === 'admin' || r === 'manager');
     const canAjuste = roles.some(r => r === 'admin' || r === 'manager');
 
     if (tipo === 'entrada' && !canEntrada) return res.status(403).json({ message: 'No autorizado (entrada)' });
@@ -316,7 +316,7 @@ router.aplicarMovimiento = aplicarMovimiento;
  * Roles: admin, manager
  * Procesa todas las entradas en una sola transacción atómica.
  */
-router.post('/inventario/movimientos/lote', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.post('/inventario/movimientos/lote', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   const client = await pool.connect();
   try {
     const { id_almacen, motivo: motivoGlobal, ref_externa: refGlobal, items } = req.body || {};
@@ -328,6 +328,12 @@ router.post('/inventario/movimientos/lote', requireAuth, requireRole('admin', 'm
     const idAlm = parseInt(id_almacen, 10);
     if (!Number.isInteger(idAlm) || idAlm <= 0) {
       return res.status(400).json({ message: 'id_almacen inválido.' });
+    }
+
+    const roles = req.user?.roles || [];
+    const isVendedor = roles.includes('vendedor');
+    if (isVendedor && idAlm !== req.user.id_almacen) {
+      return res.status(403).json({ message: 'No autorizado para operar en otra sucursal' });
     }
 
     const actorId = req.user.id || req.user.sub;

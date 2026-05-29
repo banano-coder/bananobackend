@@ -12,54 +12,51 @@ router.get('/products', async (req, res, next) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '20', 10)));
     const offset = (page - 1) * limit;
 
-    const conds = ['p.eliminado = false'];
-    const params = [];
-    let paramIndex = 1;
-
     const idAlmacen = id_almacen ? parseInt(id_almacen, 10) : null;
-    let idAlmacenParamIndex = null;
-    if (idAlmacen) {
-      params.push(idAlmacen);
-      idAlmacenParamIndex = paramIndex;
-      paramIndex++;
-    }
+
+    // --- Build Count Query ---
+    const countConds = ['p.eliminado = false'];
+    const countParams = [];
+    let countParamIndex = 1;
 
     if (search) {
-      conds.push(`(p.nombre ILIKE $${paramIndex} OR c.nombre ILIKE $${paramIndex} OR m.nombre ILIKE $${paramIndex} OR EXISTS (SELECT 1 FROM public.variante_producto vp2 WHERE vp2.id_producto = p.id_producto AND (vp2.sku ILIKE $${paramIndex} OR vp2.codigo_barras ILIKE $${paramIndex})))`);
-      params.push(`%${search}%`);
-      paramIndex++;
+      countConds.push(`(p.nombre ILIKE $${countParamIndex} OR c.nombre ILIKE $${countParamIndex} OR m.nombre ILIKE $${countParamIndex} OR EXISTS (SELECT 1 FROM public.variante_producto vp2 WHERE vp2.id_producto = p.id_producto AND (vp2.sku ILIKE $${countParamIndex} OR vp2.codigo_barras ILIKE $${countParamIndex})))`);
+      countParams.push(`%${search}%`);
+      countParamIndex++;
     }
 
     if (id_categoria) {
-      conds.push(`p.id_categoria = $${paramIndex}`);
-      params.push(parseInt(id_categoria, 10));
-      paramIndex++;
+      countConds.push(`p.id_categoria = $${countParamIndex}`);
+      countParams.push(parseInt(id_categoria, 10));
+      countParamIndex++;
     }
 
     if (id_marca) {
-      conds.push(`p.id_marca = $${paramIndex}`);
-      params.push(parseInt(id_marca, 10));
-      paramIndex++;
+      countConds.push(`p.id_marca = $${countParamIndex}`);
+      countParams.push(parseInt(id_marca, 10));
+      countParamIndex++;
     }
 
     if (status === 'activo') {
-      conds.push(`p.activo = true AND p.necesita_revision = false`);
+      countConds.push(`p.activo = true AND p.necesita_revision = false`);
     } else if (status === 'inactivo') {
-      conds.push(`p.activo = false`);
+      countConds.push(`p.activo = false`);
     } else if (status === 'borrador') {
-      conds.push(`p.necesita_revision = true`);
+      countConds.push(`p.necesita_revision = true`);
     }
 
     if (stock_status === 'positivo') {
       if (idAlmacen) {
-        conds.push(`(
+        countConds.push(`(
           SELECT COALESCE(SUM(inv2.stock), 0)::int
           FROM public.variante_producto vp2
           LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
-          WHERE vp2.id_producto = p.id_producto AND inv2.id_almacen = $${idAlmacenParamIndex}
+          WHERE vp2.id_producto = p.id_producto AND inv2.id_almacen = $${countParamIndex}
         ) > 0`);
+        countParams.push(idAlmacen);
+        countParamIndex++;
       } else {
-        conds.push(`(
+        countConds.push(`(
           SELECT COALESCE(SUM(inv2.stock), 0)::int
           FROM public.variante_producto vp2
           LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
@@ -68,14 +65,16 @@ router.get('/products', async (req, res, next) => {
       }
     } else if (stock_status === 'cero') {
       if (idAlmacen) {
-        conds.push(`(
+        countConds.push(`(
           SELECT COALESCE(SUM(inv2.stock), 0)::int
           FROM public.variante_producto vp2
           LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
-          WHERE vp2.id_producto = p.id_producto AND inv2.id_almacen = $${idAlmacenParamIndex}
+          WHERE vp2.id_producto = p.id_producto AND inv2.id_almacen = $${countParamIndex}
         ) = 0`);
+        countParams.push(idAlmacen);
+        countParamIndex++;
       } else {
-        conds.push(`(
+        countConds.push(`(
           SELECT COALESCE(SUM(inv2.stock), 0)::int
           FROM public.variante_producto vp2
           LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
@@ -84,23 +83,92 @@ router.get('/products', async (req, res, next) => {
       }
     }
 
-    const whereClause = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
-
-    // Conteo total para paginación
+    const countWhere = countConds.length ? `WHERE ${countConds.join(' AND ')}` : '';
     const countQuery = `
       SELECT COUNT(DISTINCT p.id_producto)::int AS total
       FROM public.producto p
       LEFT JOIN public.categoria c ON c.id_categoria = p.id_categoria
       LEFT JOIN public.marca m     ON m.id_marca     = p.id_marca
-      ${whereClause}
+      ${countWhere}
     `;
-    const { rows: countRows } = await pool.query(countQuery, params);
+    const { rows: countRows } = await pool.query(countQuery, countParams);
     const total = countRows[0]?.total || 0;
 
-    // Consulta de registros con límite y offset, soportando id_almacen
-    const mainParams = [...params];
-    const limitIndex = paramIndex;
-    const offsetIndex = paramIndex + 1;
+    // --- Build Main Query ---
+    const mainConds = ['p.eliminado = false'];
+    const mainParams = [];
+    let mainParamIndex = 1;
+
+    let idAlmacenParamIndex = null;
+    if (idAlmacen) {
+      mainParams.push(idAlmacen);
+      idAlmacenParamIndex = mainParamIndex;
+      mainParamIndex++;
+    }
+
+    if (search) {
+      mainConds.push(`(p.nombre ILIKE $${mainParamIndex} OR c.nombre ILIKE $${mainParamIndex} OR m.nombre ILIKE $${mainParamIndex} OR EXISTS (SELECT 1 FROM public.variante_producto vp2 WHERE vp2.id_producto = p.id_producto AND (vp2.sku ILIKE $${mainParamIndex} OR vp2.codigo_barras ILIKE $${mainParamIndex})))`);
+      mainParams.push(`%${search}%`);
+      mainParamIndex++;
+    }
+
+    if (id_categoria) {
+      mainConds.push(`p.id_categoria = $${mainParamIndex}`);
+      mainParams.push(parseInt(id_categoria, 10));
+      mainParamIndex++;
+    }
+
+    if (id_marca) {
+      mainConds.push(`p.id_marca = $${mainParamIndex}`);
+      mainParams.push(parseInt(id_marca, 10));
+      mainParamIndex++;
+    }
+
+    if (status === 'activo') {
+      mainConds.push(`p.activo = true AND p.necesita_revision = false`);
+    } else if (status === 'inactivo') {
+      mainConds.push(`p.activo = false`);
+    } else if (status === 'borrador') {
+      mainConds.push(`p.necesita_revision = true`);
+    }
+
+    if (stock_status === 'positivo') {
+      if (idAlmacen) {
+        mainConds.push(`(
+          SELECT COALESCE(SUM(inv2.stock), 0)::int
+          FROM public.variante_producto vp2
+          LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
+          WHERE vp2.id_producto = p.id_producto AND inv2.id_almacen = $${idAlmacenParamIndex}
+        ) > 0`);
+      } else {
+        mainConds.push(`(
+          SELECT COALESCE(SUM(inv2.stock), 0)::int
+          FROM public.variante_producto vp2
+          LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
+          WHERE vp2.id_producto = p.id_producto
+        ) > 0`);
+      }
+    } else if (stock_status === 'cero') {
+      if (idAlmacen) {
+        mainConds.push(`(
+          SELECT COALESCE(SUM(inv2.stock), 0)::int
+          FROM public.variante_producto vp2
+          LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
+          WHERE vp2.id_producto = p.id_producto AND inv2.id_almacen = $${idAlmacenParamIndex}
+        ) = 0`);
+      } else {
+        mainConds.push(`(
+          SELECT COALESCE(SUM(inv2.stock), 0)::int
+          FROM public.variante_producto vp2
+          LEFT JOIN public.inventario inv2 ON inv2.id_variante_producto = vp2.id_variante_producto
+          WHERE vp2.id_producto = p.id_producto
+        ) = 0`);
+      }
+    }
+
+    const mainWhere = mainConds.length ? `WHERE ${mainConds.join(' AND ')}` : '';
+    const limitIndex = mainParamIndex;
+    const offsetIndex = mainParamIndex + 1;
     mainParams.push(limit, offset);
 
     let query = `
@@ -125,7 +193,7 @@ router.get('/products', async (req, res, next) => {
       LEFT JOIN public.variante_producto vp ON vp.id_producto = p.id_producto
       LEFT JOIN public.inventario inv ON inv.id_variante_producto = vp.id_variante_producto
         ${idAlmacen ? `AND inv.id_almacen = $${idAlmacenParamIndex}` : ''}
-      ${whereClause}
+      ${mainWhere}
       GROUP BY p.id_producto, c.nombre, m.nombre, p.necesita_revision
       ORDER BY p.fecha_creacion DESC
       LIMIT $${limitIndex} OFFSET $${offsetIndex}

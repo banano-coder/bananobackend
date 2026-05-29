@@ -702,9 +702,13 @@ router.get('/pedidos/:id', requireAuth, requireRole('admin', 'manager', 'vendedo
 
     const { rows: items } = await pool.query(
       `
-      SELECT id_pedido_item, id_variante_producto, nombre_producto, sku,
-             precio_unitario::float AS precio_unitario, cantidad, subtotal::float AS subtotal
-      FROM public.pedido_item WHERE id_pedido = $1 ORDER BY id_pedido_item
+      SELECT pi.id_pedido_item, pi.id_variante_producto, pi.nombre_producto, pi.sku,
+             pi.precio_unitario::float AS precio_unitario, pi.cantidad, pi.subtotal::float AS subtotal,
+             COALESCE(v.costo, 0)::float AS costo_unitario
+      FROM public.pedido_item pi
+      LEFT JOIN public.variante_producto v ON v.id_variante_producto = pi.id_variante_producto
+      WHERE pi.id_pedido = $1 
+      ORDER BY pi.id_pedido_item
       `,
       [id]
     );
