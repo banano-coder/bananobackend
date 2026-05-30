@@ -170,9 +170,9 @@ router.post('/inventario/movimientos', requireAuth, async (req, res, next) => {
     }
     if (!Number.isInteger(idAlm) || idAlm <= 0) return res.status(400).json({ message: 'id_almacen inválido' });
 
-    // Restringir vendedor a su propia sucursal
+    // Restringir vendedor a su propia sucursal (excepto para entradas de stock)
     const isVendedor = roles.includes('vendedor');
-    if (isVendedor && idAlm !== req.user.id_almacen) {
+    if (isVendedor && idAlm !== req.user.id_almacen && tipo !== 'entrada') {
       return res.status(403).json({ message: 'No autorizado para operar en otra sucursal' });
     }
 
@@ -344,9 +344,8 @@ router.post('/inventario/movimientos/lote', requireAuth, requireRole('admin', 'm
 
     const roles = req.user?.roles || [];
     const isVendedor = roles.includes('vendedor');
-    if (isVendedor && idAlm !== req.user.id_almacen) {
-      return res.status(403).json({ message: 'No autorizado para operar en otra sucursal' });
-    }
+    // Para lote, que es solo entradas, se permite a vendedores operar en cualquier sucursal
+    // (no se restringe si es tipo entrada)
 
     const actorId = req.user.id || req.user.sub;
 
