@@ -45,6 +45,11 @@ router.post('/bulk/parse-file', requireAuth, requireRole('admin', 'manager'), up
       return res.status(400).json({ message: 'No se subió ningún archivo' });
     }
 
+    // Consultar las sedes activas en el sistema
+    const { rows: warehouses } = await pool.query(
+      `SELECT id_almacen, nombre FROM public.almacen WHERE eliminado = false AND activo = true`
+    );
+
     const workbook = XLSX.readFile(req.file.path);
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
@@ -65,7 +70,7 @@ router.post('/bulk/parse-file', requireAuth, requireRole('admin', 'manager'), up
     // Identificar posiciones de columnas basándonos en el encabezado
     const headerRow = (rawData[headerRowIndex] || []).map(h => (h !== null && h !== undefined) ? String(h).toLowerCase().trim() : '');
     
-    // Buscar índices flexibles (Añadimos comprobación de existencia)
+    // Buscar índices flexibles
     const colNombre = headerRow.findIndex(h => h && h.includes('nombre') && !h.includes('categor'));
     const colDesc = headerRow.findIndex(h => h && h.includes('descrip'));
     const colCosto = headerRow.findIndex(h => h && h.includes('costo'));
@@ -75,15 +80,25 @@ router.post('/bulk/parse-file', requireAuth, requireRole('admin', 'manager'), up
     const colMarca = headerRow.findIndex(h => h && h.includes('marca'));
     const colCodigo = headerRow.findIndex(h => h && (h.includes('codigo') || h.includes('código')));
 
-    // Si no se encuentran columnas requeridas, usar fallback genérico (según el formato inicial del usuario)
+    // Buscar correspondencias de columnas de sedes por nombre
+    const whColumns = warehouses.map(wh => {
+      const lowerName = wh.nombre.toLowerCase().trim();
+      const idx = headerRow.findIndex(h => h && h.toLowerCase().trim() === lowerName);
+      return {
+        id_almacen: wh.id_almacen,
+        nombre: wh.nombre,
+        idx
+      };
+    }).filter(wh => wh.idx >= 0);
+
     const idxNombre = colNombre >= 0 ? colNombre : 4;
-    const idxDesc = colDesc >= 0 ? colDesc : 5; // Usado antes para 'unidad', ahora para descripción/tamaño
+    const idxDesc = colDesc >= 0 ? colDesc : 5;
     const idxCosto = colCosto >= 0 ? colCosto : 7;
     const idxStock = colStock >= 0 ? colStock : 9;
     const idxPrecio = colPrecio >= 0 ? colPrecio : 10;
-    const idxCat = colCat >= 0 ? colCat : 5; // Si se comparte con otra, se usa la que el usuario defina
-    const idxMarca = colMarca >= 0 ? colMarca : -1; // Por si no viene
-    const idxCodigo = colCodigo >= 0 ? colCodigo : 0; // Fallback al index 0 si no se encuentra
+    const idxCat = colCat >= 0 ? colCat : 5;
+    const idxMarca = colMarca >= 0 ? colMarca : -1;
+    const idxCodigo = colCodigo >= 0 ? colCodigo : 0;
 
     const dataRows = rawData.slice(headerRowIndex + 1);
     const products = [];
@@ -97,14 +112,37 @@ router.post('/bulk/parse-file', requireAuth, requireRole('admin', 'manager'), up
         const rawDesc = row[idxDesc] ? String(row[idxDesc]).trim() : '';
         const costo = parseFloat(row[idxCosto]) || 0;
         const precio = parseFloat(row[idxPrecio]) || 0;
-        const stock = parseFloat(row[idxStock]) || 0;
         const codigo = row[idxCodigo] ? String(row[idxCodigo]).trim() : null;
+
+        // Leer stock por sede
+        const stock_sucursales = {};
+        whColumns.forEach(wh => {
+          const val = row[wh.idx];
+          if (val !== undefined && val !== null && val !== '') {
+            const stockVal = parseFloat(val);
+            if (!isNaN(stockVal)) {
+              stock_sucursales[wh.id_almacen] = stockVal;
+            }
+          }
+        });
+
+        // Fallback para columna clásica 'stock' si no hay columnas de sede
+        if (Object.keys(stock_sucursales).length === 0 && idxStock >= 0) {
+          const val = row[idxStock];
+          if (val !== undefined && val !== null && val !== '') {
+            const stockVal = parseFloat(val);
+            if (!isNaN(stockVal)) {
+              const defaultWhId = warehouses.length > 0 ? warehouses[0].id_almacen : 1;
+              stock_sucursales[defaultWhId] = stockVal;
+            }
+          }
+        }
         
         // Si hay nombre, es un producto NUEVO (fila padre)
         if (rawName !== '') {
             currentProduct = {
                 nombre: rawName,
-                descripcion: rawDesc, // Se usa para la descripción principal
+                descripcion: rawDesc,
                 categoria_sugerida: row[idxCat] ? String(row[idxCat]).trim() : null,
                 marca_sugerida: idxMarca >= 0 && row[idxMarca] ? String(row[idxMarca]).trim() : null,
                 variants: [
@@ -112,18 +150,15 @@ router.post('/bulk/parse-file', requireAuth, requireRole('admin', 'manager'), up
                          codigo,
                          costo,
                          precio_sugerido: precio,
-                         stock_inicial: stock,
-                         // Atributos base si se usan en un futuro
+                         stock_sucursales,
                          atributos: {} 
                     }
                 ]
             };
             products.push(currentProduct);
         } else {
-            // Si la columna nombre ESTÁ VACÍA (y hay datos numéricos o descripción extra)
-            // Es una fila HIJA (variante del último producto)
+            // Variante del último producto
             if (currentProduct) {
-                // Usamos la descripción como nombre del diferencial o atributo (ej: "100ml") si viene sola
                 let attrs = {};
                 if (rawDesc !== '') {
                     attrs['Detalle'] = rawDesc;
@@ -135,7 +170,7 @@ router.post('/bulk/parse-file', requireAuth, requireRole('admin', 'manager'), up
                     codigo,
                     costo,
                     precio_sugerido: precio,
-                    stock_inicial: stock,
+                    stock_sucursales,
                     atributos: attrs
                 });
             }
@@ -272,12 +307,31 @@ router.post('/bulk/create', requireAuth, requireRole('admin', 'manager'), async 
         const variantId = varRows[0].id_variante_producto;
         variantsCount++;
 
-        // Inventario
-        await client.query(
-          `INSERT INTO public.inventario (id_variante_producto, stock)
-           VALUES ($1, $2)`,
-          [variantId, v.stock_inicial || v.stock || 0]
-        );
+        // Inventario por sede
+        const activeWarehouses = brandCache.__activeWarehouses || (await client.query("SELECT id_almacen FROM public.almacen WHERE eliminado = false AND activo = true")).rows;
+        brandCache.__activeWarehouses = activeWarehouses;
+
+        if (v.stock_sucursales && typeof v.stock_sucursales === 'object') {
+          for (const [whId, qty] of Object.entries(v.stock_sucursales)) {
+            const stockVal = parseInt(qty, 10);
+            if (!isNaN(stockVal) && stockVal > 0) {
+              await client.query(
+                `INSERT INTO public.inventario (id_variante_producto, id_almacen, stock)
+                 VALUES ($1, $2, $3)`,
+                [variantId, parseInt(whId, 10), stockVal]
+              );
+            }
+          }
+        } else {
+          // Fallback legacy
+          const legacyStock = v.stock_inicial || v.stock || 0;
+          const defaultWhId = activeWarehouses.length > 0 ? activeWarehouses[0].id_almacen : 1;
+          await client.query(
+            `INSERT INTO public.inventario (id_variante_producto, id_almacen, stock)
+             VALUES ($1, $2, $3)`,
+            [variantId, defaultWhId, legacyStock]
+          );
+        }
       }
     }
 
@@ -307,6 +361,55 @@ router.post('/bulk/create', requireAuth, requireRole('admin', 'manager'), async 
     next(err);
   } finally {
     client.release();
+  }
+});
+
+/**
+ * GET /api/bulk/template
+ * Genera dinámicamente una plantilla Excel (.xlsx) con los nombres de las sedes como columnas.
+ */
+router.get('/bulk/template', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+  try {
+    const { rows: warehouses } = await pool.query(
+      `SELECT nombre FROM public.almacen WHERE eliminado = false AND activo = true ORDER BY nombre`
+    );
+
+    const headers = [
+      'codigo',
+      'nombre',
+      'descripcion',
+      'costo',
+      'precio_lista',
+      ...warehouses.map(wh => wh.nombre),
+      'categoria_no',
+      'marca_nombre'
+    ];
+
+    const sampleRow = {
+      codigo: '771234567890',
+      nombre: 'MEDIAS MALLA LUNEL',
+      descripcion: 'Negro / Talla M',
+      costo: 3.00,
+      precio_lista: 8.00,
+      categoria_no: 'Ropa',
+      marca_nombre: 'Lunel'
+    };
+
+    warehouses.forEach(wh => {
+      sampleRow[wh.nombre] = 10;
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet([sampleRow], { header: headers });
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Plantilla');
+
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=plantilla_productos.xlsx');
+    res.send(buffer);
+  } catch (err) {
+    next(err);
   }
 });
 

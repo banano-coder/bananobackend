@@ -286,6 +286,18 @@ router.get('/inventario/stock/:id', requireAuth, requireRole('admin', 'manager',
     const idVar = parseInt(req.params.id, 10);
     if (!Number.isInteger(idVar) || idVar <= 0) return res.status(400).json({ message: 'id inválido' });
     
+    if (req.query.detallado === 'true') {
+      const { rows } = await pool.query(
+        `SELECT a.id_almacen, a.nombre, COALESCE(i.stock, 0)::int AS stock
+         FROM public.almacen a
+         LEFT JOIN public.inventario i ON i.id_almacen = a.id_almacen AND i.id_variante_producto = $1
+         WHERE a.eliminado = false AND a.activo = true
+         ORDER BY a.nombre ASC`,
+        [idVar]
+      );
+      return res.json({ id_variante_producto: idVar, detallado: true, stocks: rows });
+    }
+
     const idAlmacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
 
     let query = '';

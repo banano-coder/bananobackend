@@ -47,7 +47,7 @@ router.get('/products/:id/variants', requireAuth, requireRole('admin', 'manager'
 });
 
 // CREATE (admin/manager)
-router.post('/products/:id/variants', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.post('/products/:id/variants', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   const client = await pool.connect();
   try {
     const idProd = parseInt(req.params.id, 10);
@@ -102,7 +102,7 @@ router.post('/products/:id/variants', requireAuth, requireRole('admin', 'manager
 });
 
 // UPDATE (admin/manager) + auditoría de cambio de precio/costo
-router.patch('/variants/:id', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.patch('/variants/:id', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   const client = await pool.connect();
   try {
     const id = parseInt(req.params.id, 10);
@@ -174,7 +174,7 @@ router.patch('/variants/:id', requireAuth, requireRole('admin', 'manager'), asyn
 });
 
 // DELETE lógico (admin/manager) — no borra si hay stock > 0
-router.delete('/variants/:id', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.delete('/variants/:id', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   const client = await pool.connect();
   try {
     const id = parseInt(req.params.id, 10);

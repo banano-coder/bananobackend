@@ -207,7 +207,7 @@ router.get('/products', async (req, res, next) => {
 });
 
 // LISTAR PENDIENTES DE REVISIÓN
-router.get('/products/pending', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.get('/products/pending', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `
@@ -235,7 +235,7 @@ router.get('/products/pending', requireAuth, requireRole('admin', 'manager'), as
  * POST /api/products
  * Crea un producto y opcionalmente una variante "Estándar" automáticamente.
  */
-router.post('/products', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.post('/products', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   const client = await pool.connect();
   try {
     const { id_categoria, id_marca, nombre, descripcion, activo, create_default_variant = true, initial_price = 0 } = req.body || {};
@@ -308,7 +308,7 @@ router.post('/products', requireAuth, requireRole('admin', 'manager'), async (re
 });
 
 // OBTENER POR ID
-router.get('/products/:id', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.get('/products/:id', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   try {
     const { id } = req.params;
     const { rows } = await pool.query(
@@ -329,7 +329,7 @@ router.get('/products/:id', requireAuth, requireRole('admin', 'manager'), async 
 });
 
 // ACTUALIZAR
-router.put('/products/:id', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.put('/products/:id', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   try {
     const { id } = req.params;
     const { id_categoria, id_marca, nombre, descripcion, activo } = req.body || {};
@@ -367,7 +367,7 @@ router.put('/products/:id', requireAuth, requireRole('admin', 'manager'), async 
 });
 
 // ELIMINAR PERMANENTE (valida ventas y borra en cascada)
-router.delete('/products/:id', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.delete('/products/:id', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   const client = await pool.connect();
   try {
     const id = parseInt(req.params.id, 10);

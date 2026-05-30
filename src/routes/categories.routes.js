@@ -18,7 +18,7 @@ router.get('/categories', requireAuth, requireRole('admin', 'manager', 'vendedor
 });
 
 // CREATE (admin/manager)
-router.post('/categories', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+router.post('/categories', requireAuth, requireRole('admin', 'manager', 'vendedor'), async (req, res, next) => {
   const client = await pool.connect();
   try {
     const { nombre, activo = true } = req.body || {};
