@@ -771,5 +771,144 @@ router.patch('/pedidos/:id/estado', requireAuth, requireRole('admin', 'manager',
   }
 });
 
+/**
+ * 5) Anular pedido (admin/manager)
+ * POST /api/pedidos/:id/anular
+ * Body: { "motivo": "...", "descontar_dinero": true|false }
+ */
+router.post('/pedidos/:id/anular', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const id = toInt(req.params.id, 0);
+    const { motivo, descontar_dinero } = req.body || {};
+    
+    if (!id) return res.status(400).json({ message: 'id inválido' });
+    if (!motivo || !String(motivo).trim()) {
+      return res.status(400).json({ message: 'El motivo de la anulación es requerido' });
+    }
+
+    await client.query('BEGIN');
+
+    await anularPedidoInterno({
+      client,
+      idPedido: id,
+      actorId: req.user.id || req.user.sub,
+      motivo: String(motivo).trim(),
+      descontarDinero: !!descontar_dinero
+    });
+
+    await client.query('COMMIT');
+    res.json({ message: 'Pedido anulado con éxito' });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { }
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+async function anularPedidoInterno({ client, idPedido, actorId, motivo, descontarDinero }) {
+  // 1. Obtener y bloquear el pedido
+  const { rows: pedRows } = await client.query(
+    `SELECT id_pedido, estado, id_almacen FROM public.pedido WHERE id_pedido = $1 FOR UPDATE`,
+    [idPedido]
+  );
+  if (!pedRows.length) {
+    const err = new Error('Pedido no encontrado');
+    err.status = 404;
+    throw err;
+  }
+  const pedido = pedRows[0];
+  if (pedido.estado === 'anulado') {
+    const err = new Error('El pedido ya está anulado');
+    err.status = 400;
+    throw err;
+  }
+
+  // 2. Revertir Stock
+  const { rows: items } = await client.query(
+    `SELECT id_variante_producto, cantidad FROM public.pedido_item WHERE id_pedido = $1`,
+    [idPedido]
+  );
+
+  const { aplicarMovimiento } = require('./inventario.routes');
+  for (const item of items) {
+    await aplicarMovimiento({
+      client,
+      idVariante: item.id_variante_producto,
+      idAlmacen: pedido.id_almacen || 1,
+      tipo: 'entrada',
+      cantidad: item.cantidad,
+      motivo: `Venta anulada (Pedido #${idPedido}): ${motivo}`,
+      refExterna: `ANUL-PED-${idPedido}`,
+      actorId: actorId
+    });
+  }
+
+  // 3. Descontar Dinero si corresponde
+  if (descontarDinero) {
+    const { rows: transacciones } = await client.query(
+      `SELECT id_transaccion, id_cuenta, monto_usd, tasa_cambio, monto_real 
+       FROM public.transaccion_caja 
+       WHERE id_pedido = $1 AND tipo = 'ingreso'`,
+      [idPedido]
+    );
+
+    for (const t of transacciones) {
+      const { rows: cRows } = await client.query(
+        `SELECT id_cuenta, saldo::float AS saldo, nombre 
+         FROM public.cuenta 
+         WHERE id_cuenta = $1 AND eliminado = false 
+         FOR UPDATE`,
+        [t.id_cuenta]
+      );
+      if (!cRows.length) {
+        const err = new Error(`Cuenta bancaria/caja ID ${t.id_cuenta} no encontrada para devolución`);
+        err.status = 404;
+        throw err;
+      }
+      const cuenta = cRows[0];
+      const nuevoSaldo = +(cuenta.saldo - t.monto_real).toFixed(2);
+      await client.query(
+        `UPDATE public.cuenta SET saldo = $2, updated_at = NOW() WHERE id_cuenta = $1`,
+        [t.id_cuenta, nuevoSaldo]
+      );
+
+      await client.query(
+        `INSERT INTO public.transaccion_caja (id_cuenta, tipo, monto_usd, tasa_cambio, monto_real, concepto, id_pedido, id_usuario)
+         VALUES ($1, 'egreso', $2, $3, $4, $5, $6, $7)`,
+        [
+          t.id_cuenta,
+          t.monto_usd,
+          t.tasa_cambio,
+          t.monto_real,
+          `Devolución Venta Anulada Pedido #${idPedido}: ${motivo}`,
+          idPedido,
+          actorId
+        ]
+      );
+    }
+  }
+
+  // 4. Cambiar estado
+  await client.query(
+    `UPDATE public.pedido SET estado = 'anulado', updated_at = NOW() WHERE id_pedido = $1`,
+    [idPedido]
+  );
+
+  // 5. Registrar Auditoría
+  await client.query(
+    `INSERT INTO public.auditoria (actor_id, target_pedido_id, target_tipo, action, payload, created_at)
+     VALUES ($1, $2, 'pedido', 'PEDIDO_ANULAR', $3::jsonb, NOW())`,
+    [
+      actorId,
+      idPedido,
+      JSON.stringify({ motivo, descontar_dinero: descontarDinero })
+    ]
+  );
+}
+
+router.anularPedidoInterno = anularPedidoInterno;
 
 module.exports = router;

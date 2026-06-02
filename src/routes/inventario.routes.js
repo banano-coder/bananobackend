@@ -445,5 +445,97 @@ router.post('/inventario/movimientos/lote', requireAuth, requireRole('admin', 'm
   } finally { client.release(); }
 });
 
+/**
+ * POST /api/inventario/transferencia
+ * Body:
+ * {
+ *   "id_variante_producto": number,
+ *   "id_almacen_origen": number,
+ *   "id_almacen_destino": number,
+ *   "cantidad": number,
+ *   "motivo": string,
+ *   "ref_externa": string
+ * }
+ */
+router.post('/inventario/transferencia', requireAuth, async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { id_variante_producto, id_almacen_origen, id_almacen_destino, cantidad, motivo, ref_externa } = req.body || {};
+
+    const roles = req.user?.roles || [];
+    const isVendedor = roles.includes('vendedor');
+
+    // Only admin and manager can transfer directly. Vendedores must use requests
+    if (isVendedor) {
+      return res.status(403).json({ message: 'No autorizado para realizar transferencias directas' });
+    }
+
+    const idVar = parseInt(id_variante_producto, 10);
+    const cant = parseInt(cantidad, 10);
+    const originId = parseInt(id_almacen_origen, 10);
+    const destId = parseInt(id_almacen_destino, 10);
+
+    if (!idVar || isNaN(idVar) || idVar <= 0) return res.status(400).json({ message: 'id_variante_producto inválido' });
+    if (!cant || isNaN(cant) || cant <= 0) return res.status(400).json({ message: 'Cantidad inválida' });
+    if (!originId || isNaN(originId) || originId <= 0) return res.status(400).json({ message: 'id_almacen_origen inválido' });
+    if (!destId || isNaN(destId) || destId <= 0) return res.status(400).json({ message: 'id_almacen_destino inválido' });
+    if (originId === destId) return res.status(400).json({ message: 'El almacén de origen y destino no pueden ser iguales' });
+
+    await client.query('BEGIN');
+
+    // Validate variant and product are active
+    const { rows: vr } = await client.query(
+      `SELECT vp.activo, p.activo AS prod_activo
+         FROM public.variante_producto vp
+         JOIN public.producto p ON p.id_producto = vp.id_producto
+        WHERE vp.id_variante_producto = $1`,
+      [idVar]
+    );
+    if (!vr.length) { await client.query('ROLLBACK'); return res.status(404).json({ message: 'Variante no existe' }); }
+    if (vr[0].activo === false || vr[0].prod_activo === false) {
+      await client.query('ROLLBACK'); return res.status(400).json({ message: 'Variante o producto inactivo' });
+    }
+
+    const actorId = req.user.id || req.user.sub;
+
+    // 1. Salida de origen
+    const outResult = await aplicarMovimiento({
+      client,
+      idVariante: idVar,
+      idAlmacen: originId,
+      tipo: 'salida',
+      cantidad: cant,
+      motivo: motivo || 'Transferencia (Origen)',
+      refExterna: ref_externa,
+      actorId
+    });
+
+    // 2. Entrada a destino
+    const inResult = await aplicarMovimiento({
+      client,
+      idVariante: idVar,
+      idAlmacen: destId,
+      tipo: 'entrada',
+      cantidad: cant,
+      motivo: motivo || 'Transferencia (Destino)',
+      refExterna: ref_externa,
+      actorId
+    });
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      message: 'Transferencia completada con éxito',
+      stock_antes_origen: outResult.stockAntes,
+      stock_despues_origen: outResult.stockDespues,
+      stock_antes_destino: inResult.stockAntes,
+      stock_despues_destino: inResult.stockDespues
+    });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { }
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    next(err);
+  } finally { client.release(); }
+});
+
 module.exports = router;
 

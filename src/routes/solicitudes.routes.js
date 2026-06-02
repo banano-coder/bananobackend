@@ -16,7 +16,7 @@ router.post('/solicitudes-autorizacion', requireAuth, async (req, res, next) => 
             return res.status(400).json({ message: 'Todos los campos son requeridos: tipo_accion, target_id, target_nombre, motivo' });
         }
 
-        const allowedActions = ['ELIMINAR_PRODUCTO', 'ELIMINAR_VARIANTE', 'REGISTRAR_SALIDA'];
+        const allowedActions = ['ELIMINAR_PRODUCTO', 'ELIMINAR_VARIANTE', 'REGISTRAR_SALIDA', 'TRANSFERIR_STOCK', 'ANULAR_VENTA'];
         if (!allowedActions.includes(tipo_accion)) {
             return res.status(400).json({ message: 'Acción no permitida para solicitar autorización' });
         }
@@ -180,6 +180,73 @@ router.post('/solicitudes-autorizacion/:id/responder', requireAuth, requireRole(
                             message: `Error al aplicar salida en almacén #${finalAlmacenId}: ${movErr.message}` 
                         });
                     }
+                }
+            } else if (solicitud.tipo_accion === 'TRANSFERIR_STOCK') {
+                const payload = typeof solicitud.payload === 'string' ? JSON.parse(solicitud.payload) : (solicitud.payload || {});
+                const { id_almacen_origen, id_almacen_destino, cantidad, motivo: movMotivo, ref_externa } = payload || {};
+                const cant = parseInt(cantidad, 10);
+                const originId = parseInt(id_almacen_origen, 10);
+                const destId = parseInt(id_almacen_destino, 10);
+
+                if (isNaN(cant) || cant <= 0 || isNaN(originId) || isNaN(destId)) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({ message: 'Datos de transferencia inválidos en el payload de la solicitud' });
+                }
+
+                try {
+                    // 1. Salida de origen
+                    await inventarioRouter.aplicarMovimiento({
+                        client,
+                        idVariante: solicitud.target_id,
+                        idAlmacen: originId,
+                        tipo: 'salida',
+                        cantidad: cant,
+                        motivo: movMotivo || solicitud.motivo || `Transferencia (Origen) - Autorizada por auditoría`,
+                        refExterna: ref_externa || `SOL-${id_solicitud}`,
+                        actorId: id_autorizador
+                    });
+
+                    // 2. Entrada a destino
+                    await inventarioRouter.aplicarMovimiento({
+                        client,
+                        idVariante: solicitud.target_id,
+                        idAlmacen: destId,
+                        tipo: 'entrada',
+                        cantidad: cant,
+                        motivo: movMotivo || solicitud.motivo || `Transferencia (Destino) - Autorizada por auditoría`,
+                        refExterna: ref_externa || `SOL-${id_solicitud}`,
+                        actorId: id_autorizador
+                    });
+                } catch (movErr) {
+                    await client.query('ROLLBACK');
+                    return res.status(movErr.status || 400).json({ 
+                        message: `Error al aplicar transferencia: ${movErr.message}` 
+                    });
+                }
+            } else if (solicitud.tipo_accion === 'ANULAR_VENTA') {
+                const payload = typeof solicitud.payload === 'string' ? JSON.parse(solicitud.payload) : (solicitud.payload || {});
+                const { descontar_dinero } = payload || {};
+                const idPedido = parseInt(solicitud.target_id, 10);
+
+                if (isNaN(idPedido)) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({ message: 'ID de pedido inválido en la solicitud' });
+                }
+
+                const pedidosRouter = require('./pedidos.routes');
+                try {
+                    await pedidosRouter.anularPedidoInterno({
+                        client,
+                        idPedido: idPedido,
+                        actorId: id_autorizador,
+                        motivo: solicitud.motivo || 'Anulación de venta autorizada por auditoría',
+                        descontarDinero: !!descontar_dinero
+                    });
+                } catch (voidErr) {
+                    await client.query('ROLLBACK');
+                    return res.status(voidErr.status || 400).json({ 
+                        message: `Error al anular pedido #${idPedido}: ${voidErr.message}` 
+                    });
                 }
             }
         }
