@@ -24,6 +24,7 @@ const almacenesRoutes = require('./routes/almacenes.routes');
 const cuentasRoutes = require('./routes/cuentas.routes');
 const moneyRoutes = require('./routes/money.routes');
 const expensesRoutes = require('./routes/expenses.routes');
+const solicitudesRoutes = require('./routes/solicitudes.routes');
 const { notFound, errorHandler } = require('./middlewares/error.middleware');
 
 const app = express();
@@ -49,6 +50,7 @@ app.use('/api', inventarioRoutes);
 app.use('/uploads', (req, res, next) => { res.setHeader('Cache-Control', 'public, max-age=31536000'); next(); });
 app.use('/uploads', require('express').static(path.join(__dirname, '..', 'uploads')));
 app.use('/api', imagesRoutes);
+app.use('/api', solicitudesRoutes);
 app.use('/api', variantsRoutes);
 app.use('/api', brandsRoutes);
 app.use('/api', categoriesRoutes);

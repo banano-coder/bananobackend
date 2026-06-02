@@ -769,9 +769,17 @@ router.get('/reports/sales-profit',
 
       // 1. Obtener KPIs (Ingresos, Costo, Ganancia Bruta, Gastos, Ganancia Neta)
       const kpisPromise = pool.query(
-        `WITH sales_kpis AS (
+        `WITH sales_income AS (
            SELECT 
-             COALESCE(SUM(p.total_estimado), 0)::float AS total_ingresos,
+             COALESCE(SUM(p.total_estimado), 0)::float AS total_ingresos
+           FROM public.pedido p
+           WHERE p.estado = 'concretado'
+             AND p.created_at >= $1::timestamptz
+             AND p.created_at < ($2::timestamptz + INTERVAL '1 day')
+             AND ($3::int IS NULL OR p.id_almacen = $3)
+         ),
+         sales_cost AS (
+           SELECT 
              COALESCE(SUM(pi.cantidad * COALESCE(v.costo, 0)), 0)::float AS total_costo
            FROM public.pedido p
            JOIN public.pedido_item pi ON pi.id_pedido = p.id_pedido
@@ -791,12 +799,12 @@ router.get('/reports/sales-profit',
              AND ($3::int IS NULL OR g.id_almacen = $3)
          )
          SELECT 
-           sk.total_ingresos,
-           sk.total_costo,
-           (sk.total_ingresos - sk.total_costo)::float AS ganancia_bruta,
+           si.total_ingresos,
+           sc.total_costo,
+           (si.total_ingresos - sc.total_costo)::float AS ganancia_bruta,
            ek.total_gastos,
-           ((sk.total_ingresos - sk.total_costo) - ek.total_gastos)::float AS ganancia_neta
-         FROM sales_kpis sk, expenses_kpis ek`,
+           ((si.total_ingresos - sc.total_costo) - ek.total_gastos)::float AS ganancia_neta
+         FROM sales_income si, sales_cost sc, expenses_kpis ek`,
         [startDate, endDate, idAlmacen]
       );
 
@@ -828,18 +836,36 @@ router.get('/reports/sales-profit',
 
       // 3. Obtener Serie Temporal Diaria para Gráfico
       const seriesPromise = pool.query(
-        `SELECT 
-           date_trunc('day', p.created_at) AS periodo,
-           COALESCE(SUM(p.total_estimado), 0)::float AS ingresos,
-           COALESCE(SUM(pi.cantidad * COALESCE(v.costo, 0)), 0)::float AS costos
-         FROM public.pedido p
-         JOIN public.pedido_item pi ON pi.id_pedido = p.id_pedido
-         LEFT JOIN public.variante_producto v ON v.id_variante_producto = pi.id_variante_producto
-         WHERE p.estado = 'concretado'
-           AND p.created_at >= $1::timestamptz
-           AND p.created_at < ($2::timestamptz + INTERVAL '1 day')
-           AND ($3::int IS NULL OR p.id_almacen = $3)
-         GROUP BY 1
+        `WITH daily_income AS (
+           SELECT 
+             date_trunc('day', p.created_at) AS periodo,
+             COALESCE(SUM(p.total_estimado), 0)::float AS ingresos
+           FROM public.pedido p
+           WHERE p.estado = 'concretado'
+             AND p.created_at >= $1::timestamptz
+             AND p.created_at < ($2::timestamptz + INTERVAL '1 day')
+             AND ($3::int IS NULL OR p.id_almacen = $3)
+           GROUP BY 1
+         ),
+         daily_costs AS (
+           SELECT 
+             date_trunc('day', p.created_at) AS periodo,
+             COALESCE(SUM(pi.cantidad * COALESCE(v.costo, 0)), 0)::float AS costos
+           FROM public.pedido p
+           JOIN public.pedido_item pi ON pi.id_pedido = p.id_pedido
+           LEFT JOIN public.variante_producto v ON v.id_variante_producto = pi.id_variante_producto
+           WHERE p.estado = 'concretado'
+             AND p.created_at >= $1::timestamptz
+             AND p.created_at < ($2::timestamptz + INTERVAL '1 day')
+             AND ($3::int IS NULL OR p.id_almacen = $3)
+           GROUP BY 1
+         )
+         SELECT 
+           COALESCE(di.periodo, dc.periodo) AS periodo,
+           COALESCE(di.ingresos, 0)::float AS ingresos,
+           COALESCE(dc.costos, 0)::float AS costos
+         FROM daily_income di
+         FULL OUTER JOIN daily_costs dc ON dc.periodo = di.periodo
          ORDER BY 1`,
         [startDate, endDate, idAlmacen]
       );
