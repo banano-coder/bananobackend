@@ -194,7 +194,19 @@ router.get('/catalog/products', async (req, res, next) => {
            FROM public.imagen_producto 
            WHERE id_producto = p.id_producto AND activo = true),
           '[]'::json
-        ) AS imagenes
+        ) AS imagenes,
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+             'id_variante_producto', vp2.id_variante_producto,
+             'sku', vp2.sku,
+             'precio_lista', vp2.precio_lista::float,
+             'atributos_json', vp2.atributos_json,
+             'url_imagen', (SELECT url FROM public.imagen_producto WHERE id_variante_producto = vp2.id_variante_producto AND activo = true LIMIT 1)
+           ) ORDER BY vp2.id_variante_producto ASC)
+           FROM public.variante_producto vp2
+           WHERE vp2.id_producto = p.id_producto AND vp2.activo = true),
+          '[]'::json
+        ) AS variantes
       FROM public.producto p
       LEFT JOIN public.categoria cat
         ON cat.id_categoria = p.id_categoria
@@ -271,7 +283,8 @@ router.get('/catalog/products/:id', async (req, res, next) => {
         vp.precio_lista::float AS precio_lista,
         COALESCE((SELECT SUM(stock) FROM public.inventario WHERE id_variante_producto = vp.id_variante_producto), 0)::int AS stock,
         vp.atributos_json,
-        vp.activo
+        vp.activo,
+        (SELECT url FROM public.imagen_producto WHERE id_variante_producto = vp.id_variante_producto AND activo = true LIMIT 1) AS url_imagen
       FROM public.variante_producto vp
       WHERE vp.id_producto = $1 AND vp.activo = true
       ORDER BY vp.id_variante_producto ASC
