@@ -428,7 +428,7 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     // 3. Obtener y bloquear todas las cuentas de dinero involucradas para sumar el saldo
     const uniqueCuentaIds = [...new Set(paymentsList.map(p => p.id_cuenta))].sort((a, b) => a - b);
     const { rows: cRows } = await client.query(
-      `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado 
+      `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado, es_cashea::boolean AS es_cashea 
        FROM public.cuenta 
        WHERE id_cuenta = ANY($1::int[]) AND eliminado = false 
        FOR UPDATE`,
@@ -448,6 +448,49 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       }
     }
 
+    // 3.5 Precalcular precios, totales y comisiones Cashea
+    const hasVesPayment = paymentsList.some(p => p.moneda_pago === 'VES');
+    let incrementoPct = 0;
+    if (hasVesPayment) {
+      const { rows: configRows } = await client.query("SELECT valor FROM public.configuracion WHERE clave = 'catalogo'");
+      const catalogoConfig = configRows[0]?.valor || {};
+      incrementoPct = parseFloat(catalogoConfig.porcentaje_incremento_bcv || 0);
+    }
+
+    // Calcular el total de la venta primero con los incrementos de VES si aplica
+    let preTotal = 0;
+    const itemsWithPrices = normItems.map(it => {
+      const v = mapVar.get(Number(it.id_variante_producto));
+      let unit = Number(v.precio_lista || 0);
+      if (hasVesPayment && incrementoPct > 0) {
+        unit = +(unit * (1 + (incrementoPct / 100))).toFixed(2);
+      }
+      const sub = +(unit * it.cantidad).toFixed(2);
+      preTotal += sub;
+      return { ...it, unit, sub, nombre_producto: v.nombre_producto, sku: v.sku };
+    });
+
+    // Calcular comisiones de Cashea
+    let comisionTotalCasheaUsd = 0;
+    const casheaCuentaIds = new Set(cRows.filter(c => c.es_cashea).map(c => c.id_cuenta));
+    
+    if (!pagos || pagos.length === 0) {
+      paymentsList[0].monto_usd = preTotal;
+      if (!paymentsList[0].monto_real) {
+        paymentsList[0].monto_real = +(preTotal * paymentsList[0].tasa_cambio).toFixed(2);
+      }
+    }
+
+    const totalCasheaPaidUsd = paymentsList
+      .filter(p => casheaCuentaIds.has(p.id_cuenta))
+      .reduce((sum, p) => sum + p.monto_usd, 0);
+
+    if (totalCasheaPaidUsd > 0) {
+      comisionTotalCasheaUsd = +(totalCasheaPaidUsd * 0.04).toFixed(2);
+    }
+
+    const ratioCashea = preTotal > 0 ? (totalCasheaPaidUsd / preTotal) : 0;
+
     // 4. Crear el pedido
     // Usamos el primer pago de la lista como resumen/fallback para las columnas de la tabla pedido
     const firstPayment = paymentsList[0];
@@ -455,8 +498,8 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       `INSERT INTO public.pedido (
         cedula_cliente, cliente_nombre, cliente_email, cliente_telefono, 
         observacion, estado, origen, id_almacen, id_usuario, id_cuenta, 
-        moneda_pago, tasa_cambio, monto_pago_real
-       ) VALUES ($1, $2, $3, $4, $5, 'concretado', 'pos', $6, $7, $8, $9, $10, $11) 
+        moneda_pago, tasa_cambio, monto_pago_real, comision_total_cashea
+       ) VALUES ($1, $2, $3, $4, $5, 'concretado', 'pos', $6, $7, $8, $9, $10, $11, $12) 
        RETURNING id_pedido`,
       [
         clienteCedulaNorm,
@@ -469,7 +512,8 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
         firstPayment.id_cuenta,
         firstPayment.moneda_pago,
         firstPayment.tasa_cambio,
-        firstPayment.monto_real
+        firstPayment.monto_real,
+        comisionTotalCasheaUsd
       ]
     );
     const id_pedido = ped[0].id_pedido;
@@ -478,23 +522,21 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     const { aplicarMovimiento } = require('./inventario.routes');
     let total = 0;
 
-    for (const it of normItems) {
-      const v = mapVar.get(Number(it.id_variante_producto));
-      const unit = Number(v.precio_lista || 0);
-      const sub = +(unit * it.cantidad).toFixed(2);
+    for (const it of itemsWithPrices) {
+      const comisionItem = +(it.sub * ratioCashea * 0.04).toFixed(2);
 
       // Insertar item de pedido
       await client.query(
-        `INSERT INTO public.pedido_item (id_pedido, id_variante_producto, nombre_producto, sku, cantidad, precio_unitario, subtotal)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [id_pedido, v.id_variante_producto, v.nombre_producto, v.sku, it.cantidad, unit, sub]
+        `INSERT INTO public.pedido_item (id_pedido, id_variante_producto, nombre_producto, sku, cantidad, precio_unitario, subtotal, comision_cashea)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [id_pedido, it.id_variante_producto, it.nombre_producto, it.sku, it.cantidad, it.unit, it.sub, comisionItem]
       );
-      total += sub;
+      total += it.sub;
 
       // Decrementar stock
       await aplicarMovimiento({
         client,
-        idVariante: v.id_variante_producto,
+        idVariante: it.id_variante_producto,
         idAlmacen: idAlmacen,
         tipo: 'salida',
         cantidad: it.cantidad,
@@ -513,11 +555,7 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
 
     // Ajustar y validar montos de pago
     if (!pagos || pagos.length === 0) {
-      // Caso fallback: un solo pago cubre todo
-      paymentsList[0].monto_usd = total;
-      if (!paymentsList[0].monto_real) {
-        paymentsList[0].monto_real = +(total * paymentsList[0].tasa_cambio).toFixed(2);
-      }
+      // Caso fallback: un solo pago cubre todo (monto_usd y monto_real ya calculados arriba)
       // Actualizar el pedido con el monto_pago_real calculado
       await client.query(
         `UPDATE public.pedido SET monto_pago_real = $2 WHERE id_pedido = $1`,
@@ -538,14 +576,17 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     // 6 & 7. Registrar transacciones de caja y actualizar saldos de cuenta
     for (const p of paymentsList) {
       const cuenta = cuentaMap.get(p.id_cuenta);
+      const isCashea = cuenta.es_cashea;
+      const comisionUsd = isCashea ? +(p.monto_usd * 0.04).toFixed(2) : 0.00;
+      const comisionReal = isCashea ? +(p.monto_real * 0.04).toFixed(2) : 0.00;
       const refText = p.referencia ? ` (Ref: ${p.referencia})` : '';
       const metodoText = p.metodo ? ` - ${p.metodo}` : '';
       const concepto = `Venta POS Pedido #${id_pedido}${metodoText}${refText}`;
 
       // Insertar transacción de caja
       await client.query(
-        `INSERT INTO public.transaccion_caja (id_cuenta, tipo, monto_usd, tasa_cambio, monto_real, concepto, id_pedido, id_usuario)
-         VALUES ($1, 'ingreso', $2, $3, $4, $5, $6, $7)`,
+        `INSERT INTO public.transaccion_caja (id_cuenta, tipo, monto_usd, tasa_cambio, monto_real, concepto, id_pedido, id_usuario, comision_usd, comision_real, liquidado)
+         VALUES ($1, 'ingreso', $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           p.id_cuenta,
           p.monto_usd,
@@ -553,7 +594,10 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
           p.monto_real,
           concepto,
           id_pedido,
-          idUsuario
+          idUsuario,
+          comisionUsd,
+          comisionReal,
+          isCashea ? false : true
         ]
       );
 

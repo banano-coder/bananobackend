@@ -25,6 +25,7 @@ const cuentasRoutes = require('./routes/cuentas.routes');
 const moneyRoutes = require('./routes/money.routes');
 const expensesRoutes = require('./routes/expenses.routes');
 const solicitudesRoutes = require('./routes/solicitudes.routes');
+const casheaRoutes = require('./routes/cashea.routes');
 const { notFound, errorHandler } = require('./middlewares/error.middleware');
 
 const app = express();
@@ -61,6 +62,7 @@ app.use('/api', almacenesRoutes);
 app.use('/api', cuentasRoutes);
 app.use('/api', moneyRoutes);
 app.use('/api', expensesRoutes);
+app.use('/api', casheaRoutes);
 
 // 404 & errores
 app.use(notFound);
