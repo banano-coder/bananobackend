@@ -155,9 +155,6 @@ router.post('/guest/checkout', async (req, res, next) => {
     if (!clienteCedulaNorm) {
       return res.status(400).json({ status: 'error', message: 'cliente_cedula es requerido' });
     }
-    if (!clienteEmailNorm) {
-      return res.status(400).json({ status: 'error', message: 'cliente_email es requerido' });
-    }
     if (!clienteTelefonoNorm) {
       return res.status(400).json({ status: 'error', message: 'cliente_telefono es requerido' });
     }
