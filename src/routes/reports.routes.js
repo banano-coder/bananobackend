@@ -888,5 +888,51 @@ router.get('/reports/sales-profit',
   }
 );
 
-module.exports = router;
+/**
+ * Commissions by seller
+ * GET /api/reports/commissions?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * Devuelve: id_usuario, nombre_usuario, total_ventas (monto_pago_real o total_estimado)
+ */
+router.get('/reports/commissions',
+  requireAuth, requireRole('admin', 'manager'),
+  async (req, res, next) => {
+    try {
+      const from = parseDate(req.query.from);
+      const to = parseDate(req.query.to);
 
+      const conds = ["p.estado = 'concretado'"];
+      const params = [];
+      let i = 1;
+
+      if (from) {
+        conds.push(`p.created_at >= $${i++}::timestamptz`);
+        params.push(from);
+      }
+      if (to) {
+        conds.push(`p.created_at < ($${i++}::timestamptz + INTERVAL '1 day')`);
+        params.push(to);
+      }
+
+      const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+
+      const { rows } = await pool.query(
+        `SELECT 
+           u.id_usuario, 
+           u.nombre AS nombre_usuario, 
+           COALESCE(SUM(p.total_estimado), 0)::float AS total_ventas
+         FROM public.pedido p
+         JOIN public.usuario u ON p.id_usuario = u.id_usuario
+         ${where}
+         GROUP BY u.id_usuario, u.nombre
+         ORDER BY total_ventas DESC`,
+        params
+      );
+
+      res.json(rows);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+module.exports = router;
