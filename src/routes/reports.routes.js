@@ -916,15 +916,31 @@ router.get('/reports/commissions',
       const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
       const { rows } = await pool.query(
-        `SELECT 
+        `WITH base_pedidos AS (
+           SELECT p.id_pedido, p.id_usuario, COALESCE(p.total_estimado, 0) AS total_estimado
+           FROM public.pedido p
+           ${where}
+         ),
+         costos_pedidos AS (
+           SELECT 
+             bp.id_pedido,
+             COALESCE(SUM(pi.cantidad * COALESCE(v.costo, 0)), 0) AS costo_total
+           FROM base_pedidos bp
+           JOIN public.pedido_item pi ON bp.id_pedido = pi.id_pedido
+           LEFT JOIN public.variante_producto v ON pi.id_variante_producto = v.id_variante_producto
+           GROUP BY bp.id_pedido
+         )
+         SELECT 
            u.id_usuario, 
            u.nombre AS nombre_usuario, 
-           COALESCE(SUM(p.total_estimado), 0)::float AS total_ventas
-         FROM public.pedido p
-         JOIN public.usuario u ON p.id_usuario = u.id_usuario
-         ${where}
+           COALESCE(SUM(bp.total_estimado), 0)::float AS total_ventas,
+           COALESCE(SUM(cp.costo_total), 0)::float AS total_costos,
+           (COALESCE(SUM(bp.total_estimado), 0) - COALESCE(SUM(cp.costo_total), 0))::float AS ganancia_neta
+         FROM base_pedidos bp
+         JOIN public.usuario u ON bp.id_usuario = u.id_usuario
+         LEFT JOIN costos_pedidos cp ON bp.id_pedido = cp.id_pedido
          GROUP BY u.id_usuario, u.nombre
-         ORDER BY total_ventas DESC`,
+         ORDER BY ganancia_neta DESC`,
         params
       );
 
