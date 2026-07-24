@@ -459,9 +459,6 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     const itemsWithPrices = normItems.map(it => {
       const v = mapVar.get(Number(it.id_variante_producto));
       let unit = Number(v.precio_lista || 0);
-      if (isOnlyVesPayment && incrementoPct > 0) {
-        unit = +(unit * (1 + (incrementoPct / 100))).toFixed(2);
-      }
       const sub = +(unit * it.cantidad).toFixed(2);
       preTotal += sub;
       return { ...it, unit, sub, nombre_producto: v.nombre_producto, sku: v.sku };
