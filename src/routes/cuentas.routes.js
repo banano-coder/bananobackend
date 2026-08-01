@@ -124,7 +124,8 @@ router.delete('/cuentas/:id', requireAuth, requireRole('admin', 'manager'), asyn
 
     const { rowCount } = await pool.query(
       `UPDATE public.cuenta
-       SET eliminado = true, activo = false, updated_at = NOW()
+       SET eliminado = true, activo = false, updated_at = NOW(),
+           nombre = nombre || ' (Eliminada ' || id_cuenta || ')'
        WHERE id_cuenta = $1 AND eliminado = false`,
       [id]
     );
