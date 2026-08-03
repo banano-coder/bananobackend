@@ -10,7 +10,8 @@ router.get('/cuentas', requireAuth, async (req, res, next) => {
     const id_almacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
     let queryText = `
       SELECT c.id_cuenta, c.nombre, c.moneda, c.saldo::float AS saldo, 
-             c.id_almacen, alm.nombre AS almacen_nombre, c.activo, c.es_cashea, c.created_at
+             c.id_almacen, alm.nombre AS almacen_nombre, c.activo, c.es_cashea,
+             c.es_efectivo, c.created_at
       FROM public.cuenta c
       LEFT JOIN public.almacen alm ON alm.id_almacen = c.id_almacen
       WHERE c.eliminado = false
@@ -32,7 +33,7 @@ router.get('/cuentas', requireAuth, async (req, res, next) => {
 // CREAR cuenta
 router.post('/cuentas', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
   try {
-    const { nombre, moneda, saldo_inicial, id_almacen, es_cashea } = req.body || {};
+    const { nombre, moneda, saldo_inicial, id_almacen, es_cashea, es_efectivo } = req.body || {};
 
     if (!nombre || !moneda) {
       return res.status(400).json({ message: 'nombre y moneda son requeridos' });
@@ -44,15 +45,16 @@ router.post('/cuentas', requireAuth, requireRole('admin', 'manager'), async (req
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO public.cuenta (nombre, moneda, saldo, id_almacen, es_cashea)
-       VALUES ($1, $2, COALESCE($3, 0.00), $4, $5)
-       RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea`,
+      `INSERT INTO public.cuenta (nombre, moneda, saldo, id_almacen, es_cashea, es_efectivo)
+       VALUES ($1, $2, COALESCE($3, 0.00), $4, $5, $6)
+       RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`,
       [
         String(nombre).trim(),
         moneda,
         saldo_inicial ? parseFloat(saldo_inicial) : 0.00,
         id_almacen ? parseInt(id_almacen, 10) : null,
-        !!es_cashea
+        !!es_cashea,
+        !!es_efectivo
       ]
     );
 
@@ -76,7 +78,7 @@ router.post('/cuentas', requireAuth, requireRole('admin', 'manager'), async (req
 router.patch('/cuentas/:id', requireAuth, requireRole('admin', 'manager'), async (req, res, next) => {
   try {
     const id = parseInt(req.params.id, 10);
-    const { nombre, activo, es_cashea } = req.body || {};
+    const { nombre, activo, es_cashea, es_efectivo } = req.body || {};
 
     if (!id) return res.status(400).json({ message: 'ID inválido' });
 
@@ -85,14 +87,16 @@ router.patch('/cuentas/:id', requireAuth, requireRole('admin', 'manager'), async
        SET nombre = COALESCE($2, nombre),
            activo = COALESCE($3, activo),
            es_cashea = COALESCE($4, es_cashea),
+           es_efectivo = COALESCE($5, es_efectivo),
            updated_at = NOW()
        WHERE id_cuenta = $1 AND eliminado = false
-       RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea`,
+       RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`,
       [
         id,
         nombre ? String(nombre).trim() : null,
         activo !== undefined ? !!activo : null,
-        es_cashea !== undefined ? !!es_cashea : null
+        es_cashea !== undefined ? !!es_cashea : null,
+        es_efectivo !== undefined ? !!es_efectivo : null
       ]
     );
 

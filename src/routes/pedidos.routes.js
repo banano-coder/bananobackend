@@ -422,18 +422,21 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       telefono: cliente_telefono || null
     });
 
-    // 3. Obtener y bloquear todas las cuentas de dinero involucradas para sumar el saldo
-    const uniqueCuentaIds = [...new Set(paymentsList.map(p => p.id_cuenta))].sort((a, b) => a - b);
+    // 3. Obtener y bloquear todas las cuentas de dinero involucradas
+    // Filtramos los pagos que ya tienen id_cuenta (efectivo sin cuenta se resuelve después)
+    const cuentaIdsIniciales = [...new Set(paymentsList.filter(p => p.id_cuenta).map(p => p.id_cuenta))].sort((a, b) => a - b);
     const { rows: cRows } = await client.query(
-      `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado, es_cashea::boolean AS es_cashea 
-       FROM public.cuenta 
-       WHERE id_cuenta = ANY($1::int[]) AND eliminado = false 
+      `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado,
+              es_cashea::boolean AS es_cashea, es_efectivo::boolean AS es_efectivo
+       FROM public.cuenta
+       WHERE id_cuenta = ANY($1::int[]) AND eliminado = false
        FOR UPDATE`,
-      [uniqueCuentaIds]
+      [cuentaIdsIniciales]
     );
 
     const cuentaMap = new Map(cRows.map(c => [c.id_cuenta, c]));
     for (const p of paymentsList) {
+      if (!p.id_cuenta) continue; // se resuelve abajo para efectivo sin cuenta
       const cuenta = cuentaMap.get(p.id_cuenta);
       if (!cuenta) {
         await client.query('ROLLBACK');
@@ -445,55 +448,93 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       }
     }
 
-    // 3.5 Precalcular precios, totales y comisiones Cashea
-    const isOnlyVesPayment = paymentsList.length > 0 && paymentsList.every(p => p.moneda_pago === 'VES');
+    // 3.5 Resolver cuenta de efectivo de la sede para pagos en efectivo sin cuenta asignada
+    // Si el pago tiene metodo 'Efectivo' y no tiene id_cuenta, se busca la caja efectivo del almacén
+    for (let i = 0; i < paymentsList.length; i++) {
+      const p = paymentsList[i];
+      const esEfectivo = (p.metodo || '').toLowerCase() === 'efectivo';
+      if (esEfectivo && (!p.id_cuenta || p.id_cuenta === 0)) {
+        const { rows: efectivoRows } = await client.query(
+          `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, es_cashea, es_efectivo
+           FROM public.cuenta
+           WHERE es_efectivo = true AND id_almacen = $1 AND eliminado = false AND activo = true
+           LIMIT 1
+           FOR UPDATE`,
+          [idAlmacen]
+        );
+        if (!efectivoRows.length) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            status: 'error',
+            message: `No hay caja de efectivo configurada para la sede/almacén #${idAlmacen}. Configure una cuenta con "Caja Efectivo" marcada para este almacén.`
+          });
+        }
+        const cuentaEfectivo = efectivoRows[0];
+        paymentsList[i].id_cuenta = cuentaEfectivo.id_cuenta;
+        if (!cuentaMap.has(cuentaEfectivo.id_cuenta)) {
+          cuentaMap.set(cuentaEfectivo.id_cuenta, cuentaEfectivo);
+        }
+      }
+    }
+
+    // 3.6 Leer porcentaje de incremento (aplica siempre que haya pagos Cashea, en Bs o USD)
+    const casheaCuentaIds = new Set([...cuentaMap.values()].filter(c => c.es_cashea).map(c => c.id_cuenta));
+    const hayCashea = paymentsList.some(p => casheaCuentaIds.has(p.id_cuenta));
+
     let incrementoPct = 0;
-    if (isOnlyVesPayment) {
+    if (hayCashea) {
       const { rows: configRows } = await client.query("SELECT valor FROM public.configuracion WHERE clave = 'catalogo'");
       const catalogoConfig = configRows[0]?.valor || {};
       incrementoPct = parseFloat(catalogoConfig.porcentaje_incremento_bcv || 0);
     }
+    const incrementoFactor = 1 + (incrementoPct / 100);
 
-    // Calcular el total de la venta primero con los incrementos de VES si aplica
-    let preTotal = 0;
+    // Calcular el total base de la venta (en USD, precio lista sin incremento)
+    let preTotalBase = 0;
     const itemsWithPrices = normItems.map(it => {
       const v = mapVar.get(Number(it.id_variante_producto));
-      let unit = Number(v.precio_lista || 0);
+      const unit = Number(v.precio_lista || 0);
       const sub = +(unit * it.cantidad).toFixed(2);
-      preTotal += sub;
+      preTotalBase += sub;
       return { ...it, unit, sub, nombre_producto: v.nombre_producto, sku: v.sku };
     });
 
-    // Calcular comisiones de Cashea
-    let comisionTotalCasheaUsd = 0;
-    const casheaCuentaIds = new Set(cRows.filter(c => c.es_cashea).map(c => c.id_cuenta));
-    
+    // Para pagos sin lista dividida (fallback un solo pago)
     if (!pagos || pagos.length === 0) {
-      paymentsList[0].monto_usd = preTotal;
+      paymentsList[0].monto_usd = preTotalBase;
       if (!paymentsList[0].monto_real) {
-        paymentsList[0].monto_real = +(preTotal * paymentsList[0].tasa_cambio).toFixed(2);
+        paymentsList[0].monto_real = +(preTotalBase * paymentsList[0].tasa_cambio).toFixed(2);
       }
     }
 
-    const totalCasheaPaidUsd = paymentsList
+    // Monto Cashea base (sin incremento) para calcular ratio y comisión
+    const totalCasheaBaseUsd = paymentsList
       .filter(p => casheaCuentaIds.has(p.id_cuenta))
       .reduce((sum, p) => sum + p.monto_usd, 0);
 
-    if (totalCasheaPaidUsd > 0) {
-      comisionTotalCasheaUsd = +(totalCasheaPaidUsd * 0.04).toFixed(2);
-    }
+    // Monto Cashea con incremento (precio real que entra en la caja Cashea)
+    const totalCasheaInfladoUsd = +(totalCasheaBaseUsd * incrementoFactor).toFixed(2);
 
-    const ratioCashea = preTotal > 0 ? (totalCasheaPaidUsd / preTotal) : 0;
+    // Comisión Cashea 4% sobre el monto inflado
+    const comisionTotalCasheaUsd = totalCasheaInfladoUsd > 0
+      ? +(totalCasheaInfladoUsd * 0.04).toFixed(2)
+      : 0;
+
+    // Ratio de Cashea sobre el total base (para distribuir comisión por item)
+    const ratioCashea = preTotalBase > 0 ? (totalCasheaBaseUsd / preTotalBase) : 0;
+
+    // Total del pedido = base de no-Cashea + inflado de Cashea
+    const totalBaseNoCashea = preTotalBase - totalCasheaBaseUsd;
+    const totalPedido = +(totalBaseNoCashea + totalCasheaInfladoUsd).toFixed(2);
 
     // 4. Crear el pedido
-    // Usamos el primer pago de la lista como resumen/fallback para las columnas de la tabla pedido
     const firstPayment = paymentsList[0];
     const { rows: ped } = await client.query(
       `INSERT INTO public.pedido (
-        cedula_cliente, cliente_nombre, cliente_email, cliente_telefono, 
-        observacion, estado, origen, id_almacen, id_usuario, id_cuenta, 
+        cedula_cliente, cliente_nombre, cliente_email, cliente_telefono,
+        observacion, estado, origen, id_almacen, id_usuario, id_cuenta,
         moneda_pago, tasa_cambio, monto_pago_real, comision_total_cashea
-       ) VALUES ($1, $2, $3, $4, $5, 'concretado', 'pos', $6, $7, $8, $9, $10, $11, $12) 
+       ) VALUES ($1, $2, $3, $4, $5, 'concretado', 'pos', $6, $7, $8, $9, $10, $11, $12)
        RETURNING id_pedido`,
       [
         clienteCedulaNorm,
@@ -512,22 +553,22 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     );
     const id_pedido = ped[0].id_pedido;
 
-    // 5. Insertar items, calcular total y aplicar decrementos de stock
+    // 5. Insertar items (subtotal refleja el precio inflado proporcional a la porción Cashea)
     const { aplicarMovimiento } = require('./inventario.routes');
     let total = 0;
 
     for (const it of itemsWithPrices) {
-      const comisionItem = +(it.sub * ratioCashea * 0.04).toFixed(2);
+      // El subtotal por item: la porción Cashea lleva el incremento, la no-Cashea queda a precio base
+      const subInflado = +(it.sub * (1 + ratioCashea * (incrementoFactor - 1))).toFixed(2);
+      const comisionItem = +(subInflado * ratioCashea * 0.04).toFixed(2);
 
-      // Insertar item de pedido
       await client.query(
         `INSERT INTO public.pedido_item (id_pedido, id_variante_producto, nombre_producto, sku, cantidad, precio_unitario, subtotal, comision_cashea)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [id_pedido, it.id_variante_producto, it.nombre_producto, it.sku, it.cantidad, it.unit, it.sub, comisionItem]
+        [id_pedido, it.id_variante_producto, it.nombre_producto, it.sku, it.cantidad, it.unit, subInflado, comisionItem]
       );
-      total += it.sub;
+      total += subInflado;
 
-      // Decrementar stock
       await aplicarMovimiento({
         client,
         idVariante: it.id_variante_producto,
@@ -541,43 +582,49 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       });
     }
 
-    // Actualizar total_estimado en el pedido
+    // Actualizar total_estimado con el precio inflado
     await client.query(
       `UPDATE public.pedido SET total_estimado = $2 WHERE id_pedido = $1`,
       [id_pedido, total]
     );
 
-    // Ajustar y validar montos de pago
-    if (!pagos || pagos.length === 0) {
-      // Caso fallback: un solo pago cubre todo (monto_usd y monto_real ya calculados arriba)
-      // Actualizar el pedido con el monto_pago_real calculado
-      await client.query(
-        `UPDATE public.pedido SET monto_pago_real = $2 WHERE id_pedido = $1`,
-        [id_pedido, paymentsList[0].monto_real]
-      );
-    } else {
-      // Caso pagos divididos: validar que la suma coincida con el total
+    // Actualizar montos de los pagos Cashea: aplicar incremento al monto_usd y monto_real
+    for (const p of paymentsList) {
+      if (casheaCuentaIds.has(p.id_cuenta)) {
+        p.monto_usd = +(p.monto_usd * incrementoFactor).toFixed(2);
+        p.monto_real = +(p.monto_real * incrementoFactor).toFixed(2);
+      }
+    }
+
+    // Validar que la suma de pagos coincida con el total inflado (solo en modo pagos divididos)
+    if (pagos && pagos.length > 0) {
       const totalPagadoUsd = paymentsList.reduce((sum, p) => sum + p.monto_usd, 0);
-      if (Math.abs(totalPagadoUsd - total) >= 0.01) {
+      if (Math.abs(totalPagadoUsd - total) >= 0.02) {
         await client.query('ROLLBACK');
         return res.status(400).json({
           status: 'error',
           message: `El monto total pagado ($${totalPagadoUsd.toFixed(2)}) no coincide con el total de la venta ($${total.toFixed(2)})`
         });
       }
+    } else {
+      await client.query(
+        `UPDATE public.pedido SET monto_pago_real = $2 WHERE id_pedido = $1`,
+        [id_pedido, paymentsList[0].monto_real]
+      );
     }
 
-    // 6 & 7. Registrar transacciones de caja y actualizar saldos de cuenta
+    // 6 & 7. Registrar transacciones de caja y actualizar saldos
     for (const p of paymentsList) {
       const cuenta = cuentaMap.get(p.id_cuenta);
       const isCashea = cuenta.es_cashea;
+      // La comisión se calcula sobre el monto inflado ya actualizado en p.monto_usd
       const comisionUsd = isCashea ? +(p.monto_usd * 0.04).toFixed(2) : 0.00;
       const comisionReal = isCashea ? +(p.monto_real * 0.04).toFixed(2) : 0.00;
       const refText = p.referencia ? ` (Ref: ${p.referencia})` : '';
       const metodoText = p.metodo ? ` - ${p.metodo}` : '';
       const concepto = `Venta POS Pedido #${id_pedido}${metodoText}${refText}`;
 
-      // Insertar transacción de caja
+      // Registrar con el monto inflado para Cashea (el precio full entra al registro)
       await client.query(
         `INSERT INTO public.transaccion_caja (id_cuenta, tipo, monto_usd, tasa_cambio, monto_real, concepto, id_pedido, id_usuario, comision_usd, comision_real, liquidado)
          VALUES ($1, 'ingreso', $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
@@ -595,18 +642,15 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
         ]
       );
 
-      // Sumar al saldo de la cuenta
       const nuevoSaldo = +(cuenta.saldo + p.monto_real).toFixed(2);
       await client.query(
         `UPDATE public.cuenta SET saldo = $2, updated_at = NOW() WHERE id_cuenta = $1`,
         [p.id_cuenta, nuevoSaldo]
       );
-
-      // Actualizar el saldo local por si se usa la misma cuenta más de una vez en el mismo pedido
       cuenta.saldo = nuevoSaldo;
     }
 
-    // 8. Registrar auditoría general de creación del pedido
+    // 8. Auditoría
     await client.query(
       `INSERT INTO public.auditoria (actor_id, target_pedido_id, target_tipo, action, payload, created_at)
        VALUES ($1, $2, 'pedido', 'PEDIDO_CREAR', $3::jsonb, NOW())`,
@@ -617,6 +661,7 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
           cedula_cliente: clienteCedulaNorm,
           cliente_nombre,
           total,
+          incrementoPct,
           items: normItems,
           pagos: paymentsList,
           id_almacen: idAlmacen
