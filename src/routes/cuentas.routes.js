@@ -8,10 +8,18 @@ const router = Router();
 router.get('/cuentas', requireAuth, async (req, res, next) => {
   try {
     const id_almacen = req.query.id_almacen ? parseInt(req.query.id_almacen, 10) : null;
+
+    // Detectar si la columna es_efectivo ya existe (migracion puede no haberse ejecutado aun)
+    const { rows: colCheck } = await pool.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'cuenta' AND column_name = 'es_efectivo'
+    `);
+    const hasEsEfectivo = colCheck.length > 0;
+
     let queryText = `
-      SELECT c.id_cuenta, c.nombre, c.moneda, c.saldo::float AS saldo, 
+      SELECT c.id_cuenta, c.nombre, c.moneda, c.saldo::float AS saldo,
              c.id_almacen, alm.nombre AS almacen_nombre, c.activo, c.es_cashea,
-             c.es_efectivo, c.created_at
+             ${hasEsEfectivo ? 'c.es_efectivo' : 'false AS es_efectivo'}, c.created_at
       FROM public.cuenta c
       LEFT JOIN public.almacen alm ON alm.id_almacen = c.id_almacen
       WHERE c.eliminado = false
@@ -44,19 +52,28 @@ router.post('/cuentas', requireAuth, requireRole('admin', 'manager'), async (req
       return res.status(400).json({ message: 'Moneda inválida (solo USD, COP, VES)' });
     }
 
-    const { rows } = await pool.query(
-      `INSERT INTO public.cuenta (nombre, moneda, saldo, id_almacen, es_cashea, es_efectivo)
-       VALUES ($1, $2, COALESCE($3, 0.00), $4, $5, $6)
-       RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`,
-      [
-        String(nombre).trim(),
-        moneda,
-        saldo_inicial ? parseFloat(saldo_inicial) : 0.00,
-        id_almacen ? parseInt(id_almacen, 10) : null,
-        !!es_cashea,
-        !!es_efectivo
-      ]
-    );
+    // Detectar si la columna es_efectivo ya fue creada
+    const { rows: colCheck } = await pool.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'cuenta' AND column_name = 'es_efectivo'
+    `);
+    const hasEsEfectivo = colCheck.length > 0;
+
+    let insertQuery, insertParams;
+    if (hasEsEfectivo) {
+      insertQuery = `INSERT INTO public.cuenta (nombre, moneda, saldo, id_almacen, es_cashea, es_efectivo)
+         VALUES ($1, $2, COALESCE($3, 0.00), $4, $5, $6)
+         RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`;
+      insertParams = [String(nombre).trim(), moneda, saldo_inicial ? parseFloat(saldo_inicial) : 0.00, id_almacen ? parseInt(id_almacen, 10) : null, !!es_cashea, !!es_efectivo];
+    } else {
+      insertQuery = `INSERT INTO public.cuenta (nombre, moneda, saldo, id_almacen, es_cashea)
+         VALUES ($1, $2, COALESCE($3, 0.00), $4, $5)
+         RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea`;
+      insertParams = [String(nombre).trim(), moneda, saldo_inicial ? parseFloat(saldo_inicial) : 0.00, id_almacen ? parseInt(id_almacen, 10) : null, !!es_cashea];
+    }
+
+    const { rows } = await pool.query(insertQuery, insertParams);
+    if (!hasEsEfectivo) rows[0].es_efectivo = false;
 
     // AUDITORIA
     await pool.query(
@@ -82,27 +99,41 @@ router.patch('/cuentas/:id', requireAuth, requireRole('admin', 'manager'), async
 
     if (!id) return res.status(400).json({ message: 'ID inválido' });
 
-    const { rows } = await pool.query(
-      `UPDATE public.cuenta
-       SET nombre = COALESCE($2, nombre),
-           activo = COALESCE($3, activo),
-           es_cashea = COALESCE($4, es_cashea),
-           es_efectivo = COALESCE($5, es_efectivo),
-           updated_at = NOW()
-       WHERE id_cuenta = $1 AND eliminado = false
-       RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`,
-      [
-        id,
-        nombre ? String(nombre).trim() : null,
-        activo !== undefined ? !!activo : null,
-        es_cashea !== undefined ? !!es_cashea : null,
-        es_efectivo !== undefined ? !!es_efectivo : null
-      ]
-    );
+    // Detectar si la columna es_efectivo ya fue creada
+    const { rows: colCheck } = await pool.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'cuenta' AND column_name = 'es_efectivo'
+    `);
+    const hasEsEfectivo = colCheck.length > 0;
+
+    let updateQuery, updateParams;
+    if (hasEsEfectivo) {
+      updateQuery = `UPDATE public.cuenta
+         SET nombre = COALESCE($2, nombre),
+             activo = COALESCE($3, activo),
+             es_cashea = COALESCE($4, es_cashea),
+             es_efectivo = COALESCE($5, es_efectivo),
+             updated_at = NOW()
+         WHERE id_cuenta = $1 AND eliminado = false
+         RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`;
+      updateParams = [id, nombre ? String(nombre).trim() : null, activo !== undefined ? !!activo : null, es_cashea !== undefined ? !!es_cashea : null, es_efectivo !== undefined ? !!es_efectivo : null];
+    } else {
+      updateQuery = `UPDATE public.cuenta
+         SET nombre = COALESCE($2, nombre),
+             activo = COALESCE($3, activo),
+             es_cashea = COALESCE($4, es_cashea),
+             updated_at = NOW()
+         WHERE id_cuenta = $1 AND eliminado = false
+         RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea`;
+      updateParams = [id, nombre ? String(nombre).trim() : null, activo !== undefined ? !!activo : null, es_cashea !== undefined ? !!es_cashea : null];
+    }
+
+    const { rows } = await pool.query(updateQuery, updateParams);
 
     if (!rows.length) {
       return res.status(404).json({ message: 'Cuenta no encontrada' });
     }
+    if (!hasEsEfectivo) rows[0].es_efectivo = false;
 
     // AUDITORIA
     await pool.query(
