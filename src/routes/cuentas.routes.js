@@ -23,7 +23,17 @@ router.get('/cuentas', requireAuth, async (req, res, next) => {
     }
     queryText += ` ORDER BY c.nombre ASC`;
 
-    const { rows } = await pool.query(queryText, params);
+    let rows;
+    try {
+      const result = await pool.query(queryText, params);
+      rows = result.rows;
+    } catch (colErr) {
+      if (colErr.code !== '42703') throw colErr;
+      const fallbackQueryText = queryText.replace('c.es_efectivo', 'false AS es_efectivo');
+      const fallbackResult = await pool.query(fallbackQueryText, params);
+      rows = fallbackResult.rows;
+    }
+
     res.json(rows);
   } catch (err) {
     next(err);
@@ -44,19 +54,39 @@ router.post('/cuentas', requireAuth, requireRole('admin', 'manager'), async (req
       return res.status(400).json({ message: 'Moneda inválida (solo USD, COP, VES)' });
     }
 
-    const { rows } = await pool.query(
-      `INSERT INTO public.cuenta (nombre, moneda, saldo, id_almacen, es_cashea, es_efectivo)
-       VALUES ($1, $2, COALESCE($3, 0.00), $4, $5, $6)
-       RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`,
-      [
-        String(nombre).trim(),
-        moneda,
-        saldo_inicial ? parseFloat(saldo_inicial) : 0.00,
-        id_almacen ? parseInt(id_almacen, 10) : null,
-        !!es_cashea,
-        !!es_efectivo
-      ]
-    );
+    let rows;
+    try {
+      const result = await pool.query(
+        `INSERT INTO public.cuenta (nombre, moneda, saldo, id_almacen, es_cashea, es_efectivo)
+         VALUES ($1, $2, COALESCE($3, 0.00), $4, $5, $6)
+         RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`,
+        [
+          String(nombre).trim(),
+          moneda,
+          saldo_inicial ? parseFloat(saldo_inicial) : 0.00,
+          id_almacen ? parseInt(id_almacen, 10) : null,
+          !!es_cashea,
+          !!es_efectivo
+        ]
+      );
+      rows = result.rows;
+    } catch (colErr) {
+      if (colErr.code !== '42703') throw colErr;
+      const result = await pool.query(
+        `INSERT INTO public.cuenta (nombre, moneda, saldo, id_almacen, es_cashea)
+         VALUES ($1, $2, COALESCE($3, 0.00), $4, $5)
+         RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea`,
+        [
+          String(nombre).trim(),
+          moneda,
+          saldo_inicial ? parseFloat(saldo_inicial) : 0.00,
+          id_almacen ? parseInt(id_almacen, 10) : null,
+          !!es_cashea
+        ]
+      );
+      rows = result.rows;
+      rows[0].es_efectivo = false;
+    }
 
     await pool.query(
       `INSERT INTO public.auditoria (actor_id, target_tipo, action, payload, created_at)
@@ -81,23 +111,46 @@ router.patch('/cuentas/:id', requireAuth, requireRole('admin', 'manager'), async
 
     if (!id) return res.status(400).json({ message: 'ID inválido' });
 
-    const { rows } = await pool.query(
-      `UPDATE public.cuenta
-       SET nombre      = COALESCE($2, nombre),
-           activo      = COALESCE($3, activo),
-           es_cashea   = COALESCE($4, es_cashea),
-           es_efectivo = COALESCE($5, es_efectivo),
-           updated_at  = NOW()
-       WHERE id_cuenta = $1 AND eliminado = false
-       RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`,
-      [
-        id,
-        nombre ? String(nombre).trim() : null,
-        activo !== undefined ? !!activo : null,
-        es_cashea !== undefined ? !!es_cashea : null,
-        es_efectivo !== undefined ? !!es_efectivo : null
-      ]
-    );
+    let rows;
+    try {
+      const result = await pool.query(
+        `UPDATE public.cuenta
+         SET nombre      = COALESCE($2, nombre),
+             activo      = COALESCE($3, activo),
+             es_cashea   = COALESCE($4, es_cashea),
+             es_efectivo = COALESCE($5, es_efectivo),
+             updated_at  = NOW()
+         WHERE id_cuenta = $1 AND eliminado = false
+         RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea, es_efectivo`,
+        [
+          id,
+          nombre ? String(nombre).trim() : null,
+          activo !== undefined ? !!activo : null,
+          es_cashea !== undefined ? !!es_cashea : null,
+          es_efectivo !== undefined ? !!es_efectivo : null
+        ]
+      );
+      rows = result.rows;
+    } catch (colErr) {
+      if (colErr.code !== '42703') throw colErr;
+      const result = await pool.query(
+        `UPDATE public.cuenta
+         SET nombre      = COALESCE($2, nombre),
+             activo      = COALESCE($3, activo),
+             es_cashea   = COALESCE($4, es_cashea),
+             updated_at  = NOW()
+         WHERE id_cuenta = $1 AND eliminado = false
+         RETURNING id_cuenta, nombre, moneda, saldo::float AS saldo, id_almacen, activo, es_cashea`,
+        [
+          id,
+          nombre ? String(nombre).trim() : null,
+          activo !== undefined ? !!activo : null,
+          es_cashea !== undefined ? !!es_cashea : null
+        ]
+      );
+      rows = result.rows;
+      if (rows.length) rows[0].es_efectivo = false;
+    }
 
     if (!rows.length) {
       return res.status(404).json({ message: 'Cuenta no encontrada' });

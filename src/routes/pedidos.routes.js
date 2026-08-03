@@ -426,14 +426,29 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     // Filtramos los pagos que ya tienen id_cuenta (efectivo sin cuenta se resuelve después)
     const cuentaIdsIniciales = [...new Set(paymentsList.filter(p => p.id_cuenta).map(p => p.id_cuenta))].sort((a, b) => a - b);
 
-    const { rows: cRows } = await client.query(
-      `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado,
-              es_cashea::boolean AS es_cashea, es_efectivo::boolean AS es_efectivo
-       FROM public.cuenta
-       WHERE id_cuenta = ANY($1::int[]) AND eliminado = false
-       FOR UPDATE`,
-      [cuentaIdsIniciales]
-    );
+    let cRows;
+    try {
+      const result = await client.query(
+        `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado,
+                es_cashea::boolean AS es_cashea, es_efectivo::boolean AS es_efectivo
+         FROM public.cuenta
+         WHERE id_cuenta = ANY($1::int[]) AND eliminado = false
+         FOR UPDATE`,
+        [cuentaIdsIniciales]
+      );
+      cRows = result.rows;
+    } catch (colErr) {
+      if (colErr.code !== '42703') throw colErr;
+      const fallbackResult = await client.query(
+        `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado,
+                es_cashea::boolean AS es_cashea, false AS es_efectivo
+         FROM public.cuenta
+         WHERE id_cuenta = ANY($1::int[]) AND eliminado = false
+         FOR UPDATE`,
+        [cuentaIdsIniciales]
+      );
+      cRows = fallbackResult.rows;
+    }
 
     const cuentaMap = new Map(cRows.map(c => [c.id_cuenta, c]));
     for (const p of paymentsList) {
@@ -454,14 +469,25 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       const p = paymentsList[i];
       const esEfectivo = (p.metodo || '').toLowerCase() === 'efectivo';
       if (esEfectivo && (!p.id_cuenta || p.id_cuenta === 0)) {
-        const { rows: efectivoRows } = await client.query(
-          `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, es_cashea, es_efectivo
-           FROM public.cuenta
-           WHERE es_efectivo = true AND id_almacen = $1 AND eliminado = false AND activo = true
-           LIMIT 1
-           FOR UPDATE`,
-          [idAlmacen]
-        );
+        let efectivoRows;
+        try {
+          const result = await client.query(
+            `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, es_cashea, es_efectivo
+             FROM public.cuenta
+             WHERE es_efectivo = true AND id_almacen = $1 AND eliminado = false AND activo = true
+             LIMIT 1
+             FOR UPDATE`,
+            [idAlmacen]
+          );
+          efectivoRows = result.rows;
+        } catch (colErr) {
+          if (colErr.code !== '42703') throw colErr;
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            status: 'error',
+            message: `Ejecute la migración SQL (ALTER TABLE cuenta ADD COLUMN es_efectivo) para habilitar la asignación automática de caja por sede. Por ahora, seleccione la cuenta de destino manualmente.`
+          });
+        }
         if (!efectivoRows.length) {
           await client.query('ROLLBACK');
           return res.status(400).json({
