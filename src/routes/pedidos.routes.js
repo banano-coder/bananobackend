@@ -426,17 +426,9 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     // Filtramos los pagos que ya tienen id_cuenta (efectivo sin cuenta se resuelve después)
     const cuentaIdsIniciales = [...new Set(paymentsList.filter(p => p.id_cuenta).map(p => p.id_cuenta))].sort((a, b) => a - b);
 
-    // Verificar si la columna es_efectivo ya existe en BD
-    const { rows: colCheckPed } = await client.query(`
-      SELECT 1 FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name = 'cuenta' AND column_name = 'es_efectivo'
-    `);
-    const hasEsEfectivoPed = colCheckPed.length > 0;
-
     const { rows: cRows } = await client.query(
       `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado,
-              es_cashea::boolean AS es_cashea,
-              ${hasEsEfectivoPed ? 'es_efectivo::boolean AS es_efectivo' : 'false AS es_efectivo'}
+              es_cashea::boolean AS es_cashea, es_efectivo::boolean AS es_efectivo
        FROM public.cuenta
        WHERE id_cuenta = ANY($1::int[]) AND eliminado = false
        FOR UPDATE`,
@@ -458,19 +450,10 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     }
 
     // 3.5 Resolver cuenta de efectivo de la sede para pagos en efectivo sin cuenta asignada
-    // Si el pago tiene metodo 'Efectivo' y no tiene id_cuenta, se busca la caja efectivo del almacén
     for (let i = 0; i < paymentsList.length; i++) {
       const p = paymentsList[i];
       const esEfectivo = (p.metodo || '').toLowerCase() === 'efectivo';
       if (esEfectivo && (!p.id_cuenta || p.id_cuenta === 0)) {
-        if (!hasEsEfectivoPed) {
-          // La columna aún no existe: no podemos auto-resolver. Requerir id_cuenta explícito.
-          await client.query('ROLLBACK');
-          return res.status(400).json({
-            status: 'error',
-            message: `Ejecute la migración SQL (ALTER TABLE cuenta ADD COLUMN es_efectivo) para habilitar la asignación automática de caja por sede. Por ahora, seleccione la cuenta de destino manualmente.`
-          });
-        }
         const { rows: efectivoRows } = await client.query(
           `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, es_cashea, es_efectivo
            FROM public.cuenta
