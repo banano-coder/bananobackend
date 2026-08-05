@@ -512,9 +512,14 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     // 3.6 Leer porcentaje de incremento (aplica siempre que haya pagos Cashea, en Bs o USD)
     const casheaCuentaIds = new Set([...cuentaMap.values()].filter(c => c.es_cashea).map(c => c.id_cuenta));
     const hayCashea = paymentsList.some(p => casheaCuentaIds.has(p.id_cuenta));
+    const isOnlyVes = paymentsList.length > 0 && paymentsList.every(p => {
+      const c = cuentaMap.get(p.id_cuenta);
+      return c?.moneda === 'VES';
+    });
+    const appliesMarkup = hayCashea || isOnlyVes;
 
     let incrementoPct = 0;
-    if (hayCashea) {
+    if (appliesMarkup) {
       const { rows: configRows } = await client.query("SELECT valor FROM public.configuracion WHERE clave = 'catalogo'");
       const catalogoConfig = configRows[0]?.valor || {};
       incrementoPct = parseFloat(catalogoConfig.porcentaje_incremento_bcv || 0);
@@ -544,8 +549,13 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       .filter(p => casheaCuentaIds.has(p.id_cuenta))
       .reduce((sum, p) => sum + p.monto_usd, 0);
 
-    // Monto Cashea con incremento (precio real que entra en la caja Cashea)
-    const totalCasheaInfladoUsd = +(totalCasheaBaseUsd * incrementoFactor).toFixed(2);
+    // Si aplica markup, toda la orden se infla
+    const totalPedido = appliesMarkup ? +(preTotalBase * incrementoFactor).toFixed(2) : preTotalBase;
+
+    // Monto Cashea con incremento (para comisión)
+    const totalCasheaInfladoUsd = appliesMarkup 
+      ? +(totalCasheaBaseUsd * incrementoFactor).toFixed(2)
+      : totalCasheaBaseUsd;
 
     // Comisión Cashea 4% sobre el monto inflado
     const comisionTotalCasheaUsd = totalCasheaInfladoUsd > 0
@@ -554,10 +564,6 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
 
     // Ratio de Cashea sobre el total base (para distribuir comisión por item)
     const ratioCashea = preTotalBase > 0 ? (totalCasheaBaseUsd / preTotalBase) : 0;
-
-    // Total del pedido = base de no-Cashea + inflado de Cashea
-    const totalBaseNoCashea = preTotalBase - totalCasheaBaseUsd;
-    const totalPedido = +(totalBaseNoCashea + totalCasheaInfladoUsd).toFixed(2);
 
     // 4. Crear el pedido
     const firstPayment = paymentsList[0];
@@ -590,14 +596,16 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
     let total = 0;
 
     for (const it of itemsWithPrices) {
-      // El subtotal por item: la porción Cashea lleva el incremento, la no-Cashea queda a precio base
-      const subInflado = +(it.sub * (1 + ratioCashea * (incrementoFactor - 1))).toFixed(2);
+      // Si appliesMarkup, TODOS los items se inflan para coincidir con totalPedido
+      const subInflado = appliesMarkup 
+        ? +(it.sub * incrementoFactor).toFixed(2)
+        : it.sub;
       const comisionItem = +(subInflado * ratioCashea * 0.04).toFixed(2);
 
       await client.query(
         `INSERT INTO public.pedido_item (id_pedido, id_variante_producto, nombre_producto, sku, cantidad, precio_unitario, subtotal, comision_cashea)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [id_pedido, it.id_variante_producto, it.nombre_producto, it.sku, it.cantidad, it.unit, subInflado, comisionItem]
+        [id_pedido, it.id_variante_producto, it.nombre_producto, it.sku, it.cantidad, appliesMarkup ? +(it.unit * incrementoFactor).toFixed(2) : it.unit, subInflado, comisionItem]
       );
       total += subInflado;
 
@@ -620,9 +628,10 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       [id_pedido, total]
     );
 
-    // Actualizar montos de los pagos Cashea: aplicar incremento al monto_usd y monto_real
+    // Actualizar montos de todos los pagos: si aplica markup, todos los montos se inflan
+    // Esto es porque el frontend los envía deflactados (en monto base)
     for (const p of paymentsList) {
-      if (casheaCuentaIds.has(p.id_cuenta)) {
+      if (appliesMarkup) {
         p.monto_usd = +(p.monto_usd * incrementoFactor).toFixed(2);
         p.monto_real = +(p.monto_real * incrementoFactor).toFixed(2);
       }
