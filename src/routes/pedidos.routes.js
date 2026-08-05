@@ -428,6 +428,7 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
 
     let cRows;
     try {
+      await client.query('SAVEPOINT check_es_efectivo');
       const result = await client.query(
         `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado,
                 es_cashea::boolean AS es_cashea, es_efectivo::boolean AS es_efectivo
@@ -436,9 +437,11 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
          FOR UPDATE`,
         [cuentaIdsIniciales]
       );
+      await client.query('RELEASE SAVEPOINT check_es_efectivo');
       cRows = result.rows;
     } catch (colErr) {
       if (colErr.code !== '42703') throw colErr;
+      await client.query('ROLLBACK TO SAVEPOINT check_es_efectivo');
       const fallbackResult = await client.query(
         `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, eliminado,
                 es_cashea::boolean AS es_cashea, false AS es_efectivo
@@ -471,6 +474,7 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
       if (esEfectivo && (!p.id_cuenta || p.id_cuenta === 0)) {
         let efectivoRows;
         try {
+          await client.query('SAVEPOINT check_efectivo_sede');
           const result = await client.query(
             `SELECT id_cuenta, nombre, moneda, saldo::float AS saldo, activo, es_cashea, es_efectivo
              FROM public.cuenta
@@ -479,9 +483,11 @@ router.post('/pos/checkout', requireAuth, requireRole('admin', 'manager', 'vende
              FOR UPDATE`,
             [idAlmacen]
           );
+          await client.query('RELEASE SAVEPOINT check_efectivo_sede');
           efectivoRows = result.rows;
         } catch (colErr) {
           if (colErr.code !== '42703') throw colErr;
+          await client.query('ROLLBACK TO SAVEPOINT check_efectivo_sede');
           await client.query('ROLLBACK');
           return res.status(400).json({
             status: 'error',
